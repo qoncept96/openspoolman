@@ -1,0 +1,13 @@
+# Upstream ships no .dockerignore, so `COPY . .` baked .git (5 MB) plus any
+# local data/ and logs/ into the image, and busted the layer cache on every
+# git operation. The Dockerfile mkdirs data/ and logs/ itself, and data/ is a
+# bind mount at runtime.
+.git
+.github
+.gitattributes
+.dockerignore
+__pycache__
+*.pyc
+node_modules
+data
+logs
