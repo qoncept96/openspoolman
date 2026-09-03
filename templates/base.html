@@ -7,6 +7,9 @@
   <meta name="apple-mobile-web-app-title" content="OpenSpoolMan">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>OpenSpoolMan</title>
+  <link rel="manifest" href="{{ url_for('static', filename='manifest.webmanifest') }}">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#212529">
   <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}">
   <link href="{{ url_for('static', filename='css/style.css') }}" rel="stylesheet">
   <link href="{{ url_for('static', filename='css/bootstrap.min.css') }}" rel="stylesheet">
@@ -40,7 +43,7 @@
         <li><a href="{{ url_for('home') }}" class="nav-link px-2 link-body-emphasis">Home</a></li>
         <li><a href="{{ url_for('assign_tag') }}" class="nav-link px-2 link-body-emphasis">Assign NFC Tag</a></li>
         <li><a href="{{ url_for('print_history') }}" class="nav-link px-2 link-body-emphasis">Print History</a></li>
-        <li><a href="{{ SPOOLMAN_BASE_URL }}" target="_blank" class="nav-link px-2 link-body-emphasis">SpoolMan</a></li>
+        <li><a href="{{ SPOOLMAN_BASE_URL }}" target="spoolman" class="nav-link px-2 link-body-emphasis">SpoolMan</a></li>
       </ul>
     </div>
   </div>
@@ -187,6 +190,98 @@
       })
     })
   })
+</script>
+
+<!-- patch 7: in-page NFC tag capture (see openspoolman-patch/patch7.py) -->
+<style>
+  #nfc-pill {
+    position: fixed; left: 50%; transform: translateX(-50%);
+    bottom: 12px; z-index: 1080; max-width: 92vw;
+    border: 0; border-radius: 999px; padding: .5rem 1rem;
+    font-size: .875rem; line-height: 1.2; box-shadow: 0 .25rem .75rem rgba(0,0,0,.3);
+    background: var(--bs-secondary-bg, #e9ecef); color: var(--bs-body-color, #212529);
+  }
+  #nfc-pill.armed { background: var(--bs-success, #198754); color: #fff; }
+  #nfc-pill.hot   { background: var(--bs-primary, #0d6efd); color: #fff; }
+  #nfc-pill[hidden] { display: none; }
+</style>
+<button id="nfc-pill" type="button" hidden></button>
+<script>
+(function () {
+  // write_tag owns the NFC radio for pushing; a reader there would grab the
+  // freshly written tag and navigate away mid-write.
+  if (location.pathname.indexOf('/write_tag') === 0) return;
+  if (!('NDEFReader' in window)) return;   // http:// or non-Chrome: no-op
+
+  const pill = document.getElementById('nfc-pill');
+  const reader = new NDEFReader();
+  let scanning = false, handled = false;
+
+  function say(text, cls) {
+    pill.textContent = text;
+    pill.className = cls || '';
+    pill.hidden = false;
+  }
+
+  function tagUrl(message) {
+    for (const record of message.records) {
+      if (record.recordType !== 'url' && record.recordType !== 'absolute-url') continue;
+      try {
+        const raw = new TextDecoder(record.encoding || 'utf-8').decode(record.data);
+        // Tags may have been written with a different base URL than the one
+        // this page was loaded from (LAN vs tailnet). Keep the path, keep the
+        // origin we are already on -- that origin is the one that works.
+        const u = new URL(raw, location.origin);
+        return u.origin === location.origin ? u.href : location.origin + u.pathname + u.search;
+      } catch (e) { /* not a URL record we understand */ }
+    }
+    return null;
+  }
+
+  reader.onreading = function (event) {
+    if (handled) return;
+    const url = tagUrl(event.message);
+    if (!url) { say('Tag has no OpenSpoolMan link', ''); return; }
+    handled = true;
+    say('Opening spool…', 'hot');
+    if (navigator.vibrate) navigator.vibrate(40);
+    location.replace(url);   // same tab, no history entry
+  };
+
+  reader.onreadingerror = function () { say('Could not read that tag — tap again', ''); };
+
+  function start(fromClick) {
+    if (scanning) return;
+    scanning = true;
+    reader.scan().then(function () {
+      say('● Tap a spool tag', 'armed');
+      setTimeout(function () { if (!handled) pill.hidden = true; }, 4000);
+    }).catch(function (err) {
+      scanning = false;
+      if (err && err.name === 'NotAllowedError' && !fromClick) {
+        say('Enable tap-to-scan', '');   // needs a gesture to ask for permission
+        return;
+      }
+      say('NFC unavailable: ' + (err && err.name ? err.name : err), '');
+    });
+  }
+
+  pill.addEventListener('click', function () {
+    if (scanning) { pill.hidden = true; return; }
+    start(true);
+  });
+
+  // Permission is remembered per origin, so after the first grant every page
+  // load arms itself with no tap at all.
+  if (navigator.permissions && navigator.permissions.query) {
+    navigator.permissions.query({name: 'nfc'}).then(function (status) {
+      if (status.state === 'granted') start(false);
+      else say('Enable tap-to-scan', '');
+    }).catch(function () { start(false); });
+  } else {
+    start(false);
+  }
+})();
 </script>
 </body>
 </html>

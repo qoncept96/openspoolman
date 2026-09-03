@@ -1,0 +1,13 @@
+{
+  "name": "OpenSpoolMan",
+  "short_name": "SpoolTap",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#212529",
+  "theme_color": "#212529",
+  "icons": [
+    {"src": "logo.png", "sizes": "676x676", "type": "image/png", "purpose": "any"},
+    {"src": "logo.png", "sizes": "676x676", "type": "image/png", "purpose": "maskable"}
+  ]
+}
