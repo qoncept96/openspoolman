@@ -57,7 +57,7 @@ def _save_checkpoint_metadata(metadata: dict) -> None:
   _checkpoint_metadata_path().write_text(json.dumps(metadata))
 
 
-def save_checkpoint(*, model_path: str, current_layer: int, task_id, subtask_id, ams_mapping, gcode_file_name: str) -> None:
+def save_checkpoint(*, model_path: str, current_layer: int, task_id, subtask_id, ams_mapping, gcode_file_name: str, print_id=None) -> None:
   dest = _checkpoint_dir() / "model.3mf"
   dest.write_bytes(Path(model_path).read_bytes())
 
@@ -67,6 +67,7 @@ def save_checkpoint(*, model_path: str, current_layer: int, task_id, subtask_id,
   existing["current_layer"] = current_layer
   existing["ams_mapping"] = ams_mapping
   existing["gcode_file_name"] = gcode_file_name
+  existing["print_id"] = print_id
   _save_checkpoint_metadata(existing)
 
 
@@ -110,7 +111,7 @@ def recover_model(task_id, subtask_id):
   if current_layer is None or gcode_file_name is None:
     return None
 
-  return str(model_path), gcode_file_name, current_layer, ams_mapping
+  return str(model_path), gcode_file_name, current_layer, ams_mapping, metadata.get("print_id")
 
 
 class GCodeOperation:
@@ -364,6 +365,7 @@ class FilamentUsageTracker:
       subtask_id=subtask_id,
       ams_mapping=self.ams_mapping,
       gcode_file_name=gcode_file_name,
+      print_id=self.print_id,
     )
 
     try:
@@ -817,7 +819,11 @@ class FilamentUsageTracker:
       log("[filament-tracker] No checkpoint to recover")
       return
     log(f"[filament-tracker] Recovering from checkpoint task={task_id} subtask={subtask_id}")
-    model_path, gcode_file_name, current_layer, ams_mapping = result
+    model_path, gcode_file_name, current_layer, ams_mapping, checkpoint_print_id = result
+    # Without this the resumed print has no row to close out, so it stays "Printing" forever.
+    if self.print_id is None and checkpoint_print_id is not None:
+      self.print_id = checkpoint_print_id
+      log(f"[filament-tracker] Recovered print_id {checkpoint_print_id} from checkpoint")
     self._load_model(model_path, gcode_file_name)
     self.spent_layers = set(range(current_layer + 1))
     self.ams_mapping = ams_mapping

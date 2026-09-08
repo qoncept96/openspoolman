@@ -257,41 +257,46 @@ def processMessage(data):
     
     if data["print"].get("command") == "project_file" and data["print"].get("url"):
       PENDING_PRINT_METADATA = getMetaDataFrom3mf(data["print"]["url"])
-      PENDING_PRINT_METADATA["print_type"] = PRINTER_STATE["print"].get("print_type")
-      PENDING_PRINT_METADATA["task_id"] = PRINTER_STATE["print"].get("task_id")
-      PENDING_PRINT_METADATA["subtask_id"] = PRINTER_STATE["print"].get("subtask_id")
-      if TRACK_LAYER_USAGE:
-        FILAMENT_TRACKER.set_print_metadata(PENDING_PRINT_METADATA)
-
-      print_id = insert_print(PRINTER_STATE["print"]["subtask_name"], "cloud", PENDING_PRINT_METADATA.get("image"))
-
-      if PRINTER_STATE["print"].get("use_ams"):
-        PENDING_PRINT_METADATA["ams_mapping"] = PRINTER_STATE["print"]["ams_mapping"]
+      if not PENDING_PRINT_METADATA:
+        # An unreadable/absent 3MF leaves us with no filament list. Log it and record nothing:
+        # a missing history row is a visible failure, a row we can never close out is not.
+        log(f"[WARNING] No usable 3MF metadata for {data['print']['url']}; not recording this print.")
       else:
-        PENDING_PRINT_METADATA["ams_mapping"] = [EXTERNAL_SPOOL_ID]
-
-      PENDING_PRINT_METADATA["print_id"] = print_id
-      PENDING_PRINT_METADATA["complete"] = True
-
-      for id, filament in PENDING_PRINT_METADATA["filaments"].items():
-        parsed_grams = _parse_grams(filament.get("used_g"))
-        parsed_length_m = _parse_grams(filament.get("used_m"))
-        estimated_length_mm = parsed_length_m * 1000 if parsed_length_m is not None else None
-        grams_used = parsed_grams if parsed_grams is not None else 0.0
-        length_used = estimated_length_mm if estimated_length_mm is not None else 0.0
+        PENDING_PRINT_METADATA["print_type"] = PRINTER_STATE["print"].get("print_type")
+        PENDING_PRINT_METADATA["task_id"] = PRINTER_STATE["print"].get("task_id")
+        PENDING_PRINT_METADATA["subtask_id"] = PRINTER_STATE["print"].get("subtask_id")
         if TRACK_LAYER_USAGE:
-          grams_used = 0.0
-          length_used = 0.0
-        insert_filament_usage(
-            print_id,
-            filament["type"],
-            filament["color"],
-            grams_used,
-            id,
-            estimated_grams=parsed_grams,
-            length_used=length_used,
-            estimated_length=estimated_length_mm,
-        )
+          FILAMENT_TRACKER.set_print_metadata(PENDING_PRINT_METADATA)
+
+        print_id = insert_print(PRINTER_STATE["print"]["subtask_name"], "cloud", PENDING_PRINT_METADATA.get("image"))
+
+        if PRINTER_STATE["print"].get("use_ams"):
+          PENDING_PRINT_METADATA["ams_mapping"] = PRINTER_STATE["print"]["ams_mapping"]
+        else:
+          PENDING_PRINT_METADATA["ams_mapping"] = [EXTERNAL_SPOOL_ID]
+
+        PENDING_PRINT_METADATA["print_id"] = print_id
+        PENDING_PRINT_METADATA["complete"] = True
+
+        for id, filament in PENDING_PRINT_METADATA.get("filaments", {}).items():
+          parsed_grams = _parse_grams(filament.get("used_g"))
+          parsed_length_m = _parse_grams(filament.get("used_m"))
+          estimated_length_mm = parsed_length_m * 1000 if parsed_length_m is not None else None
+          grams_used = parsed_grams if parsed_grams is not None else 0.0
+          length_used = estimated_length_mm if estimated_length_mm is not None else 0.0
+          if TRACK_LAYER_USAGE:
+            grams_used = 0.0
+            length_used = 0.0
+          insert_filament_usage(
+              print_id,
+              filament["type"],
+              filament["color"],
+              grams_used,
+              id,
+              estimated_grams=parsed_grams,
+              length_used=length_used,
+              estimated_length=estimated_length_mm,
+          )
   
     #if ("gcode_state" in data["print"] and data["print"]["gcode_state"] == "RUNNING") and ("print_type" in data["print"] and data["print"]["print_type"] != "local") \
     #  and ("tray_tar" in data["print"] and data["print"]["tray_tar"] != "255") and ("stg_cur" in data["print"] and data["print"]["stg_cur"] == 0 and PRINT_CURRENT_STAGE != 0):
@@ -322,7 +327,7 @@ def processMessage(data):
             PENDING_PRINT_METADATA["print_id"] = print_id
             FILAMENT_TRACKER.start_local_print_from_metadata(PENDING_PRINT_METADATA)
 
-            for id, filament in PENDING_PRINT_METADATA["filaments"].items():
+            for id, filament in PENDING_PRINT_METADATA.get("filaments", {}).items():
               parsed_grams = _parse_grams(filament.get("used_g"))
               parsed_length_m = _parse_grams(filament.get("used_m"))
               estimated_length_mm = parsed_length_m * 1000 if parsed_length_m is not None else None

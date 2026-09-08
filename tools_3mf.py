@@ -81,7 +81,9 @@ def download3mfFromFTP(filename, destFile):
   # 7: could not connect, 28: timeout, 35: SSL connect error,
   # 52: empty reply, 55: send error, 56: recv error.
   # 78: remote file not found, 13: bad PASV/EPSV response, 9: access denied.
-  reconnect_codes = {7, 28, 35, 52, 55, 56}
+  # 78 and 13 are in here because the printer's FTPS server leaves the handle unusable after a
+  # miss - reusing it makes the next (valid) path stall until the 120s response timeout.
+  reconnect_codes = {7, 13, 28, 35, 52, 55, 56, 78}
   c = setupPycurlConnection(ftp_user, ftp_pass)
   try:
     for attempt in range(1, max_retries + 1):
@@ -100,6 +102,10 @@ def download3mfFromFTP(filename, destFile):
           c.setopt(c.WRITEDATA, f)
           log(f"[DEBUG] Attempt {attempt}: Starting download of {remote_path}...")
           c.perform()
+          f.flush()
+          if not zipfile.is_zipfile(local_path):
+            log(f"[WARNING] {remote_path} did not return a 3MF archive (a bare directory path yields a listing). Trying next path...")
+            continue
           log("[DEBUG] File successfully downloaded!")
           return True
         except pycurl.error as e:
@@ -200,17 +206,21 @@ def getMetaDataFrom3mf(url):
       elif url.startswith("local:"):
         download3mfFromLocalFilesystem(url.replace("local:", ""), temp_file)
       elif url.startswith(("file://", "ftp://", "ftps://")):
-        file_path = urlparse(url).path
-        filename = os.path.basename(file_path)
-        download3mfFromFTP(filename, temp_file)
+        # OrcaSlicer reports the model as "ftp://Name.gcode.3mf" (two slashes), which parses the
+        # filename into netloc and leaves path empty. Bambu Studio sends "ftp:///Name.gcode.3mf".
+        parsed = urlparse(url)
+        filename = os.path.basename(parsed.path) or parsed.netloc
+        if not download3mfFromFTP(filename, temp_file):
+          return {}
       else:
-        download3mfFromFTP(url.rpartition('/')[-1], temp_file) # Pull just filename to clear out any unexpected paths
+        if not download3mfFromFTP(url.rpartition('/')[-1], temp_file): # Pull just filename to clear out any unexpected paths
+          return {}
       
       temp_file.close()
       metadata["model_path"] = url
 
       parsed_url = urlparse(url)
-      metadata["file"] = os.path.basename(parsed_url.path)
+      metadata["file"] = os.path.basename(parsed_url.path) or parsed_url.netloc
 
       log(f"3MF file downloaded and saved as {temp_file_name}.")
 
