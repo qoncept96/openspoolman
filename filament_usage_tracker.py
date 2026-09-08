@@ -88,6 +88,17 @@ def update_checkpoint_layer(layer: int) -> None:
   _save_checkpoint_metadata(metadata)
 
 
+def update_checkpoint_tray_substitutions(substitutions: dict) -> None:
+  metadata = _get_checkpoint_metadata()
+  metadata["tray_substitutions"] = substitutions
+  _save_checkpoint_metadata(metadata)
+
+
+def get_checkpoint_tray_substitutions() -> dict:
+  value = _get_checkpoint_metadata().get("tray_substitutions")
+  return dict(value) if isinstance(value, dict) else {}
+
+
 def recover_model(task_id, subtask_id):
   metadata = _get_checkpoint_metadata()
 
@@ -232,6 +243,9 @@ class FilamentUsageTracker:
     self._layer_tracking_start_time = None
     self._pending_usage_mm = {}
     self._mc_remaining_time_minutes = None
+    self._ams_tray_loaded = {}
+    self._tray_now_mapping_value = None
+    self._tray_substitutions = {}
 
   def set_print_metadata(self, metadata: dict | None) -> None:
     metadata = metadata or {}
@@ -256,6 +270,8 @@ class FilamentUsageTracker:
     command = print_obj.get("command")
     if print_obj.get('gcode_state') is not None:
       log(f"[filament-tracker] on_message command={command} gcode_state={print_obj.get('gcode_state')}")
+
+    self._observe_ams_state(print_obj)
 
     previous_state = self.gcode_state
     self.gcode_state = print_obj.get("gcode_state", self.gcode_state)
@@ -558,6 +574,7 @@ class FilamentUsageTracker:
       return False
 
     tray_uid = self._tray_uid_from_mapping(mapping_value)
+    tray_uid = self._substitute_tray_uid(tray_uid)
     if tray_uid is None:
       self._pending_usage_mm[filament] = self._pending_usage_mm.get(filament, 0.0) + total_mm
       return False
@@ -619,6 +636,7 @@ class FilamentUsageTracker:
     self._layer_tracking_start_time = None
     self._pending_usage_mm = {}
     self._mc_remaining_time_minutes = None
+    self._tray_substitutions = {}
     self.cumulative_length_used = {}
     self.cumulative_grams_used = {}
 
@@ -670,7 +688,7 @@ class FilamentUsageTracker:
     mapping_value = self._resolve_tray_mapping(filament_index)
     if mapping_value is None:
       return None
-    tray_uid = self._tray_uid_from_mapping(mapping_value)
+    tray_uid = self._substitute_tray_uid(self._tray_uid_from_mapping(mapping_value))
     if tray_uid is None:
       return None
     return self._lookup_spool_for_tray(tray_uid)
@@ -777,6 +795,74 @@ class FilamentUsageTracker:
     tray_id = mapping_value - ams_id * 4
     return trayUid(ams_id, tray_id)
 
+  def _observe_ams_state(self, print_obj: dict) -> None:
+    """Remember which AMS trays hold filament, and which tray is feeding right now.
+
+    The printer's own filament backup can move a print onto a different tray when one runs
+    out. The print's ams_mapping never changes, so without this we keep charging the spool
+    that ran dry."""
+    ams_state = print_obj.get("ams")
+    if not isinstance(ams_state, dict):
+      return
+
+    for unit in ams_state.get("ams") or []:
+      try:
+        ams_id = int(unit.get("id"))
+      except (TypeError, ValueError):
+        continue
+      for tray in unit.get("tray") or []:
+        try:
+          tray_id = int(tray.get("id"))
+        except (TypeError, ValueError):
+          continue
+        self._ams_tray_loaded[trayUid(ams_id, tray_id)] = bool(tray.get("tray_type"))
+
+    if "tray_now" in ams_state:
+      try:
+        tray_now = int(ams_state.get("tray_now"))
+      except (TypeError, ValueError):
+        tray_now = None
+      self._tray_now_mapping_value = tray_now if tray_now is not None and 0 <= tray_now <= 15 else None
+
+  def _mapped_tray_uids(self) -> set:
+    if not self.using_ams or not self.ams_mapping:
+      return set()
+    uids = set()
+    for mapping_value in self.ams_mapping:
+      uid = self._tray_uid_from_mapping(mapping_value)
+      if uid:
+        uids.add(uid)
+    return uids
+
+  def _substitute_tray_uid(self, tray_uid: str | None) -> str | None:
+    """Follow the printer onto its backup tray once the mapped tray is empty."""
+    if tray_uid is None:
+      return None
+
+    substitute = self._tray_substitutions.get(tray_uid)
+    if substitute:
+      return substitute
+
+    # Only ever reconsider a tray the printer reports as holding no filament.
+    if self._ams_tray_loaded.get(tray_uid) is not False:
+      return tray_uid
+
+    if self._tray_now_mapping_value is None:
+      return tray_uid
+
+    current_uid = self._tray_uid_from_mapping(self._tray_now_mapping_value)
+    if current_uid is None or current_uid == tray_uid:
+      return tray_uid
+
+    # In a multi-filament print the feeding tray legitimately belongs to another filament.
+    if current_uid in self._mapped_tray_uids():
+      return tray_uid
+
+    log(f"[filament-tracker] Tray {tray_uid} is empty; printer switched to {current_uid}, following it")
+    self._tray_substitutions[tray_uid] = current_uid
+    update_checkpoint_tray_substitutions(self._tray_substitutions)
+    return current_uid
+
   def _resolve_tray_mapping(self, filament_index: int) -> int | None:
     if self.using_ams:
       if self.ams_mapping is None or filament_index >= len(self.ams_mapping):
@@ -829,6 +915,9 @@ class FilamentUsageTracker:
     self.ams_mapping = ams_mapping
     self.current_layer = current_layer
     self.using_ams = ams_mapping is not None
+    self._tray_substitutions = get_checkpoint_tray_substitutions()
+    if self._tray_substitutions:
+      log(f"[filament-tracker] Recovered tray substitutions {self._tray_substitutions}")
     
     # Initialize cumulative usage from database to continue tracking correctly
     self.cumulative_grams_used = {}
