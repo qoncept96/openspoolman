@@ -592,7 +592,17 @@ def print_history():
     filament = print_history_service.get_filament_for_slot(print_id, ams_slot)
     print_history_service.update_filament_spool(print_id, ams_slot, spool_id)
 
-    if(filament["spool_id"] != int(spool_id) and (not old_spool_id or (old_spool_id and filament["spool_id"] == int(old_spool_id)))):
+    # Who currently carries the charge for this slot. NULL when the print ran on a
+    # tray with no spool bound, which is exactly the case we want to be able to fix.
+    current_spool_id = _to_int(filament.get("spool_id"))
+    requested_old_spool_id = _to_int(old_spool_id)
+    stale_request = (
+        requested_old_spool_id is not None
+        and requested_old_spool_id != -1
+        and requested_old_spool_id != current_spool_id
+    )
+
+    if current_spool_id != int(spool_id) and not stale_request:
       grams_used = _to_float(filament.get("grams_used"))
       length_used = _to_float(filament.get("length_used"))
 
@@ -607,9 +617,9 @@ def print_history():
 
       use_length = length_used is not None and length_used > 0
 
-      if old_spool_id and int(old_spool_id) != -1:
+      if current_spool_id is not None and current_spool_id != -1:
         _consume_for_spool(
-            old_spool_id,
+            current_spool_id,
             grams_value=-(grams_used or 0),
             length_value=-(length_used or 0) if use_length else None,
         )
