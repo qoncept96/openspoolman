@@ -581,6 +581,13 @@ def print_history():
     elif grams_value is not None:
       spoolman_client.consumeSpool(spool_id_value, use_weight=grams_value)
 
+  def _grams_from_length(spool_id_value, length_mm):
+    spool = spoolman_client.getSpoolById(spool_id_value) or {}
+    filament_data = spool.get("filament", {}) or {}
+    radius_cm = (filament_data.get("diameter", 1.75) / 2) / 10
+    volume_cm3 = math.pi * radius_cm * radius_cm * (length_mm / 10)
+    return volume_cm3 * filament_data.get("density", 1.24)
+
   if all([ams_slot, print_id, spool_id]):
     filament = print_history_service.get_filament_for_slot(print_id, ams_slot)
     print_history_service.update_filament_spool(print_id, ams_slot, spool_id)
@@ -588,6 +595,16 @@ def print_history():
     if(filament["spool_id"] != int(spool_id) and (not old_spool_id or (old_spool_id and filament["spool_id"] == int(old_spool_id)))):
       grams_used = _to_float(filament.get("grams_used"))
       length_used = _to_float(filament.get("length_used"))
+
+      # Nothing was charged while the print ran - the tray had no spool bound, so the
+      # tracker only recorded the length (or, with tracking off, nothing at all).
+      # Fall back to the tracked length, then to the slicer estimate, otherwise
+      # assigning a spool after the fact silently deducts zero.
+      backfilled = not (grams_used or 0)
+      if backfilled and not (length_used or 0):
+        length_used = _to_float(filament.get("estimated_length"))
+        grams_used = _to_float(filament.get("estimated_grams"))
+
       use_length = length_used is not None and length_used > 0
 
       if old_spool_id and int(old_spool_id) != -1:
@@ -602,6 +619,26 @@ def print_history():
           grams_value=grams_used,
           length_value=length_used if use_length else None,
       )
+
+      if backfilled and (use_length or (grams_used or 0) > 0):
+        # Write the charge back onto the history row so it stops reporting 0 g printed.
+        if use_length:
+          grams_used = _grams_from_length(spool_id, length_used)
+        if grams_used:
+          print_history_service.update_filament_grams_used(
+              print_id, ams_slot, round(grams_used, 2),
+              length_used=length_used if use_length else None,
+          )
+          print_history_service.update_layer_tracking(
+              print_id,
+              filament_grams_billed=round(
+                  sum(
+                      _to_float(row.get("grams_used")) or 0
+                      for row in (print_history_service.get_all_filament_usage_for_print(print_id) or {}).values()
+                  ),
+                  2,
+              ),
+          )
 
   prints, total_prints = print_history_service.get_prints_with_filament(limit=per_page, offset=offset)
   layer_tracking_map = print_history_service.get_layer_tracking_for_prints([print["id"] for print in prints])

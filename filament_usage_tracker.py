@@ -486,6 +486,7 @@ class FilamentUsageTracker:
       self._handle_layer_change(layer)
 
     self._flush_all_pending_usage()
+    self._persist_unbilled_usage()
     self._maybe_update_predicted_total()
     self._update_layer_tracking_progress()
     if self.print_id:
@@ -511,6 +512,7 @@ class FilamentUsageTracker:
 
     log("[filament-tracker] Print aborted, stopping tracking")
     self._flush_all_pending_usage()
+    self._persist_unbilled_usage()
     self._maybe_update_predicted_total()
     self._update_layer_tracking_progress()
     if self.print_id:
@@ -619,6 +621,26 @@ class FilamentUsageTracker:
     self._filament_spool_id_map[filament] = spool_id
     self._spool_data_cache[spool_id] = spool_data
     return True
+
+  def _persist_unbilled_usage(self) -> None:
+    """
+    Record length that was tracked but never billed because the tray had no spool
+    bound (e.g. a print run from the external spool). Without this the history row
+    keeps grams_used = 0 and assigning a spool to the print afterwards deducts nothing.
+    """
+    if not self.print_id or not self._pending_usage_mm:
+      return
+    for filament, pending_mm in self._pending_usage_mm.items():
+      if not pending_mm or pending_mm <= 0:
+        continue
+      filament_key = filament + 1
+      if self.cumulative_grams_used.get(filament_key):
+        log(f"[filament-tracker] {round(pending_mm, 5)}mm for filament {filament} stayed unbilled "
+            f"after some usage was already charged, leaving the row alone")
+        continue
+      log(f"[filament-tracker] Recording {round(pending_mm, 5)}mm unbilled for filament {filament} "
+          f"(no spool assigned); assign a spool to this print to charge it")
+      update_filament_grams_used(self.print_id, filament_key, 0.0, length_used=round(pending_mm, 5))
 
   def _flush_all_pending_usage(self) -> None:
     if not self._pending_usage_mm:
