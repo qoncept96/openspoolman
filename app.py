@@ -39,6 +39,8 @@ LAYER_TRACKING_STATUS_DISPLAY = {
     "COMPLETED": ("Finished", "success"),
     "ABORTED": ("Cancelled", "danger"),
     "FAILED": ("Failed", "danger"),
+    # Container was down when the print ended, so the finish was never seen.
+    "INTERRUPTED": ("Interrupted", "secondary"),
 }
 
 if not USE_TEST_DATA:

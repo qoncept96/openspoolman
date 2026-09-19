@@ -12,7 +12,7 @@ from config import EXTERNAL_SPOOL_AMS_ID, EXTERNAL_SPOOL_ID, TRACK_LAYER_USAGE
 from spoolman_client import consumeSpool
 from spoolman_service import fetchSpools, getAMSFromTray, trayUid
 from tools_3mf import download3mfFromCloud, download3mfFromFTP, download3mfFromLocalFilesystem
-from print_history import update_filament_spool, update_filament_grams_used, get_all_filament_usage_for_print, update_layer_tracking
+from print_history import update_filament_spool, update_filament_grams_used, get_all_filament_usage_for_print, update_layer_tracking, close_stale_running_prints, record_split_spool
 from logger import log
 
 
@@ -21,6 +21,14 @@ LAYER_TRACKING_STATUS_RUNNING = "RUNNING"
 LAYER_TRACKING_STATUS_COMPLETED = "COMPLETED"
 LAYER_TRACKING_STATUS_ABORTED = "ABORTED"
 LAYER_TRACKING_STATUS_FAILED = "FAILED"
+# The container was down when this print ended, so nobody ever saw the finish.
+# Deliberately not ABORTED ("Cancelled"), which would assert something we do not
+# know, and load-bearing elsewhere: an INTERRUPTED row may only be charged on
+# measured length, never on the slicer estimate.
+LAYER_TRACKING_STATUS_INTERRUPTED = "INTERRUPTED"
+#: A print is in flight in these states. PAUSE is included on purpose - a runout
+#: pause can sit for hours and must never be mistaken for a finished print.
+LIVE_GCODE_STATES = {"RUNNING", "PAUSE", "PREPARE", "SLICING"}
 ABORT_INDICATOR_STATES = {
     "STOP",
     "ABORT",
@@ -246,6 +254,9 @@ class FilamentUsageTracker:
     self._ams_tray_loaded = {}
     self._tray_now_mapping_value = None
     self._tray_substitutions = {}
+    # Process-lifetime one-shot, deliberately not reset per print: see
+    # _reconcile_stale_running.
+    self._startup_reconciled = False
 
   def set_print_metadata(self, metadata: dict | None) -> None:
     metadata = metadata or {}
@@ -281,6 +292,12 @@ class FilamentUsageTracker:
       except (TypeError, ValueError):
         self._mc_remaining_time_minutes = None
 
+    # First message that actually carries a state - the reply to the pushall sent
+    # on connect. Gate on the field present in *this* message, not self.gcode_state,
+    # which is sticky from the assignment above.
+    if not self._startup_reconciled and print_obj.get("gcode_state") is not None:
+      self._reconcile_stale_running(print_obj.get("gcode_state"))
+
     if command == "project_file":
       self._handle_print_start(print_obj)
 
@@ -311,6 +328,39 @@ class FilamentUsageTracker:
       task_id = print_obj.get("task_id")
       subtask_id = print_obj.get("subtask_id")
       self._attempt_print_resume(task_id, subtask_id)
+
+  def _reconcile_stale_running(self, observed_state: str | None) -> None:
+    """Close print rows left on RUNNING because the container was down at the finish.
+
+    Nothing else in the app ever closes them: the FINISH branch needs an
+    active_model, the abort branch needs to have observed RUNNING in this same
+    process, and neither survives a restart. So the row stays "Printing" forever.
+
+    Runs once per process, on the first MQTT message carrying a gcode_state
+    rather than at startup - at import time there is no printer state at all, and
+    closing rows then would kill a genuinely live print's row on every mid-print
+    container restart.
+    """
+    self._startup_reconciled = True
+    state = (observed_state or "").upper()
+    if state in LIVE_GCODE_STATES:
+      # A print is (or may be) in flight; the checkpoint resume path owns it.
+      log(f"[filament-tracker] Startup reconcile skipped, printer state is {state}")
+      return
+
+    closed = close_stale_running_prints(
+        status=LAYER_TRACKING_STATUS_INTERRUPTED,
+        # Not excluding the checkpoint's print_id on purpose: if the container
+        # died mid-print and the printer has since finished, that is exactly the
+        # row we are here to close.
+        exclude_print_ids=[self.print_id] if self.print_id else None,
+        actual_end_time=self._format_timestamp(datetime.now()),
+    )
+    if closed:
+      log(f"[filament-tracker] Printer state {state}; closed stale RUNNING prints "
+          f"{closed} as {LAYER_TRACKING_STATUS_INTERRUPTED}")
+      # The checkpoint names a job the printer demonstrably is not running.
+      clear_checkpoint()
 
   def _handle_print_start(self, print_obj: dict) -> None:
     log("[filament-tracker] Print start")
