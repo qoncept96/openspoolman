@@ -214,6 +214,7 @@ def augmentTrayDataWithSpoolMan(spool_list, tray_data, ams_id, tray_id):
       "spool_material",
       "spool_sub_brand",
       "remaining_weight",
+      "initial_weight",
       "last_used",
       "spool_color",
       "spool_color_orientation",
@@ -235,6 +236,9 @@ def augmentTrayDataWithSpoolMan(spool_list, tray_data, ams_id, tray_id):
       tray_data["spool_material"] = spool["filament"].get("material", "")
       tray_data["spool_sub_brand"] = (spool["filament"].get("extra", {}).get("type") or "").replace('"', '').strip()
       tray_data["remaining_weight"] = spool["remaining_weight"]
+      # Denominator for the fill bar on the tray rows. Same fallback order as
+      # the cost-per-gram calculation further down.
+      tray_data["initial_weight"] = spool.get("initial_weight") or spool["filament"].get("weight") or 0
 
 
       if "last_used" in spool:
@@ -355,6 +359,7 @@ def augmentTrayDataWithSpoolMan(spool_list, tray_data, ams_id, tray_id):
       "spool_material",
       "spool_sub_brand",
       "remaining_weight",
+      "initial_weight",
       "last_used",
       "spool_color",
       "spool_color_orientation",

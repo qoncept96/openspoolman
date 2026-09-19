@@ -1,154 +1,130 @@
-<div class="card tray-card">
-  <!-- Tray ID -->
-  <div class="card-header d-flex justify-content-between align-items-center">
-    <div class="d-flex align-items-center flex-wrap gap-2">
-      {% if tray_data.issue %}
-      <i class="bi bi-exclamation-triangle-fill text-warning me-1"></i>
-      {% endif %}
-      <div class="fw-semibold">
-        {% if ams_id|int != EXTERNAL_SPOOL_AMS_ID %}
-          Tray {{ (tray_data.id)|int + 1 }}
-        {% else %}
-          External Spool
-        {% endif %}
-        {% if tray_data.tray_type %}
-          - {{ tray_data.tray_type }}{% if tray_data.tray_sub_brand %} {{ tray_data.tray_sub_brand }}{% endif %}
-        {% endif %}
-      </div>
-    </div>
-    {% if tray_data.tray_color %}
-      {% if tray_data.color_mismatch %}
-        {% set color_popover_attrs = 'role="button" tabindex="0" data-bs-toggle="popover" data-bs-container="body" data-bs-trigger="manual" data-bs-placement="bottom" data-bs-content="' ~ tray_data.color_mismatch_message ~ '"' %}
-      {% else %}
-        {% set color_popover_attrs = '' %}
-      {% endif %}
-      <div class="d-flex align-items-center gap-2">
-        <div class="tray-color-wrapper" {{ color_popover_attrs|safe }}>
-          <span class="ms-2 border rounded tray-color-swatch" style="background-color: #{{ tray_data.tray_color | replace('#', '') }};"></span>
-          {% if tray_data.color_mismatch %}
-            <i class="bi bi-exclamation-triangle-fill text-warning tray-color-warning"></i>
-          {% endif %}
-        </div>
-      </div>
-    {% endif %}
-  </div>
+{#
+  One compact row per slot. Used for both AMS trays and the external spool, and for
+  both the overview (pick_tray=False -> Fill) and the assign page (pick_tray=True ->
+  Assign). The whole row is the tap target via .stretched-link; anything interactive
+  inside the row (the color-mismatch popover, the Bambu link button) needs to sit
+  above it, which .tray-interactive does.
+#}
+{% set is_external = ams_id|int == EXTERNAL_SPOOL_AMS_ID %}
+{% set colors = tray_data.spool_color if (tray_data.spool_color is iterable and tray_data.spool_color is not string and tray_data.spool_color_orientation) else None %}
+{# Prefer the filament's own color over what the AMS reports; the two differ exactly
+   when color_mismatch is set, and the swatch below shows the AMS side of that. #}
+{% if tray_data.spool_color and not colors %}
+  {% set rail_color = tray_data.spool_color | replace('#', '') %}
+{% elif tray_data.tray_color %}
+  {% set rail_color = tray_data.tray_color | replace('#', '') %}
+{% else %}
+  {% set rail_color = None %}
+{% endif %}
+{% set ams_color = tray_data.tray_color | replace('#', '') if tray_data.tray_color else None %}
+{% if pick_tray %}
+  {% set row_href = url_for('tray_load', spool_id=current_spool['id'], tag_id=tag_id, ams=ams_id, tray=tray_id) %}
+  {% set row_action = 'Assign' %}
+{% else %}
+  {% set row_href = url_for('fill', ams=ams_id, tray=tray_id) %}
+  {% set row_action = 'Fill' %}
+{% endif %}
+{% if AUTO_SPEND and tray_data.matched and tray_data.remaining_weight is defined %}
+  {% set amount = (tray_data.remaining_weight|round(1)|string) ~ 'g' %}
+{% elif tray_data.spool_material and tray_data.remain is defined and tray_data.remain|int >= 0 %}
+  {% set amount = (tray_data.remain|int|string) ~ '%' %}
+{% else %}
+  {% set amount = None %}
+{% endif %}
+{% if tray_data.spool_material and tray_data.remaining_weight is defined and tray_data.initial_weight is defined and tray_data.initial_weight|float > 0 %}
+  {% set bar_pct = [[(tray_data.remaining_weight|float / tray_data.initial_weight|float * 100)|round(0)|int, 0]|max, 100]|min %}
+{% elif tray_data.spool_material and tray_data.remain is defined and tray_data.remain|int >= 0 %}
+  {% set bar_pct = [tray_data.remain|int, 100]|min %}
+{% else %}
+  {% set bar_pct = None %}
+{% endif %}
 
-  <div class="card-body">
+<div class="tray-row{% if is_external %} tray-row-external{% endif %}">
+  {# Color rail: a gradient for multi-color spools, a flat fill otherwise. #}
+  {% if colors %}
+    <span class="tray-rail" style="background: linear-gradient(to bottom{% for color in colors %}, #{{ color }} {{ loop.index0 * 100 // colors|length }}%, #{{ color }} {{ loop.index * 100 // colors|length }}%{% endfor %});"></span>
+  {% elif rail_color %}
+    <span class="tray-rail" style="background-color: #{{ rail_color }};"></span>
+  {% else %}
+    <span class="tray-rail tray-rail-empty"></span>
+  {% endif %}
+
+  <span class="tray-slot">
+    {% if is_external %}
+      <i class="bi bi-box-arrow-in-right"></i>
+    {% else %}
+      {{ (tray_data.id)|int + 1 }}
+    {% endif %}
+  </span>
+
+  <span class="tray-main">
+    <span class="tray-title">
+      {% if tray_data.issue %}<i class="bi bi-exclamation-triangle-fill text-warning me-1"></i>{% endif %}
+      {% if tray_data.spool_material %}
+        {{ tray_data.spool_material }}{% if tray_data.spool_sub_brand %} {{ tray_data.spool_sub_brand }}{% endif %} &middot; <span class="fw-semibold">{{ tray_data.name }}</span>
+      {% elif tray_data.unmapped_bambu_tag %}
+        <span class="text-warning fw-semibold">Unknown spool</span>{% if tray_data.bambu_material %} &middot; {{ tray_data.bambu_material }}{% endif %}
+      {% else %}
+        {% if tray_data.tray_type %}{{ tray_data.tray_type }} &middot; {% endif %}<span class="text-muted">Empty</span>
+      {% endif %}
+    </span>
+    <span class="tray-sub small text-muted">
+      {% if tray_data.spool_material %}
+        {% if tray_data.spool_id %}#{{ tray_data.spool_id }}{% endif %}{% if tray_data.vendor %} {{ tray_data.vendor }}{% endif %}
+        {% if tray_data.last_used %}<span class="tray-used d-none d-md-inline">&middot; {{ tray_data.last_used }}</span>{% endif %}
+      {% elif tray_data.unmapped_bambu_tag %}
+        Bambu Lab{% if tray_data.bambu_sub_brand %} - {{ tray_data.bambu_sub_brand }}{% endif %}
+      {% endif %}
+    </span>
     {% if tray_data.mismatch %}
-      <div class="alert alert-warning d-flex align-items-start py-2 mb-3">
-        <i class="bi bi-exclamation-triangle-fill text-danger me-2 fs-5"></i>
-        <div class="text-start">
-          <div class="fw-semibold">Filament type mismatch</div>
-          <small>
-            AMS reports <span class="fw-semibold">{{ tray_data.tray_type }}</span>{% if tray_data.tray_sub_brand %} <span class="text-muted">{{ tray_data.tray_sub_brand }}</span>{% endif %}, but the assigned spool is {% if tray_data.spool_material %} <span class="fw-semibold">{{ tray_data.spool_material }}</span>{% if tray_data.spool_sub_brand %} <span>{{ tray_data.spool_sub_brand }}</span>{% endif %}{% endif %}.
-          </small>
-        </div>
-      </div>
+      <span class="tray-warn small text-warning">
+        <i class="bi bi-exclamation-triangle-fill me-1"></i>AMS reports {{ tray_data.tray_type }}{% if tray_data.tray_sub_brand %} {{ tray_data.tray_sub_brand }}{% endif %}, spool is {{ tray_data.spool_material }}{% if tray_data.spool_sub_brand %} {{ tray_data.spool_sub_brand }}{% endif %}
+      </span>
     {% endif %}
     {% if tray_data.ams_material_missing %}
-      <div class="alert alert-warning d-flex align-items-start py-2 mb-3">
-        <i class="bi bi-info-circle-fill text-warning me-2 fs-5"></i>
-        <div class="text-start">
-          <div class="fw-semibold">No AMS material selected</div>
-          <small>{{ tray_data.ams_material_missing_message }}</small>
-        </div>
-      </div>
+      <span class="tray-warn small text-warning">
+        <i class="bi bi-info-circle-fill me-1"></i>{{ tray_data.ams_material_missing_message }}
+      </span>
     {% endif %}
-    <!-- Typ & Hersteller -->
-    {% if tray_data.spool_material %}
-      <div class="small text-muted text-center mb-2">
-          {% if tray_data.spool_id %}#{{ tray_data.spool_id }} {% endif %}
-          {{ tray_data.spool_material }}{% if tray_data.spool_sub_brand %} - {{ tray_data.spool_sub_brand }}{% endif %}
-          {% if tray_data.vendor %} - {{ tray_data.vendor }}{% endif %}
-      </div>
-    {% elif tray_data.unmapped_bambu_tag %}
-      <div class="small text-muted text-center mb-2">
-          <span class="fw-semibold text-warning">Unknown spool detected</span><br>
-          Bambu Lab{% if tray_data.bambu_material %} - {{ tray_data.bambu_material }}{% endif %}{% if tray_data.bambu_sub_brand %} - {{ tray_data.bambu_sub_brand }}{% endif %}
-      </div>
+  </span>
+
+  {% if tray_data.spool_material and not colors %}
+    {% if tray_data.spool_color %}
+      <span class="tray-hex badge d-none d-md-inline"
+            style="background-color: #{{ tray_data.spool_color }};
+                   color: {% if color_is_dark(tray_data.spool_color) %}#FFFFFF{% else %}#000000{% endif %}">
+        #{{ tray_data.spool_color | upper }}
+      </span>
     {% else %}
-      <div class="small text-muted text-center mb-2 tray-empty">
-          Empty
-      </div>
+      <span class="tray-hex badge d-none d-md-inline badge-missing-color" title="Color not set"></span>
     {% endif %}
+  {% endif %}
 
-    <div class="row align-items-center text-center text-sm-start">
-      {% if tray_data.spool_material %}
-        <!-- Farbname + Badge -->
-        <div class="col-12 col-xxl-5 d-flex flex-column align-items-center mb-2 mb-sm-0">
-          <!-- Farbname -->
-          <div class="fw-semibold mb-1 text-center">
-            {{ tray_data.name }}
-          </div>
-          {% if tray_data.spool_color is iterable and tray_data.spool_color_orientation %}
-            <!-- Multi-Color Badge -->
-            {% if tray_data.spool_color_orientation == "coaxial" %}
-            <div class="spool-icon horizontal">
-            {% else %}
-            <div class="spool-icon vertical">
-            {% endif %}
-              {% for color in tray_data.spool_color %}
-                <div style="background-color:#{{ color }}" title="#{{ color }}"></div>
-              {% endfor %}
-            </div>
-          {% else %}
-            <!-- Single Color Badge -->
-            {% if tray_data.spool_color %}
-              <span class="badge d-inline-block p-2"
-                    style="background-color: #{{ tray_data.spool_color }};
-                           color: {% if color_is_dark(tray_data.spool_color) %}#FFFFFF{% else %}#000000{% endif %}">
-                #{{ tray_data.spool_color | upper }}
-              </span>
-            {% else %}
-              <span class="badge d-inline-block p-2 badge-missing-color" title="Color not set"></span>
-            {% endif %}
-          {% endif %}
-        </div>
+  {% if tray_data.color_mismatch %}
+    <span class="tray-interactive tray-color-wrapper" role="button" tabindex="0"
+          data-bs-toggle="popover" data-bs-container="body" data-bs-trigger="manual"
+          data-bs-placement="bottom" data-bs-content="{{ tray_data.color_mismatch_message }}">
+      <span class="border rounded tray-color-swatch" style="background-color: #{{ ams_color or '000000' }};"></span>
+      <i class="bi bi-exclamation-triangle-fill text-warning tray-color-warning"></i>
+    </span>
+  {% endif %}
 
-        <!-- Textinfos -->
-        <div class="col-12 col-xxl-7">
-          <!-- Last used -->
-          <div class="mt-2 d-flex flex-column flex-sm-row">
-            <div class="me-sm-1">Last used:</div>
-            <div class="fw-bold">{{ tray_data.last_used }}</div>
-          </div>
-          <!-- Remaining -->
-          <div class="mt-2 d-flex flex-column flex-sm-row">
-            <div class="me-sm-1">Remaining:</div>
-            {% if AUTO_SPEND and tray_data.matched %}
-              <div class="fw-bold">{{ tray_data.remaining_weight|round(1) }}g</div>
-            {% else %}
-              <div class="fw-bold">{{ tray_data.remain }}%</div>
-            {% endif %}
-          </div>
-        </div>
-      {% elif tray_data.unmapped_bambu_tag %}
-        {% set ams_model = AMS_MODELS_BY_ID.get(ams_id) %}
-        {% set hide_unmapped_remaining_percent = ams_model == "AMS Lite" %}
-        <div class="col-12">
-          {% if not hide_unmapped_remaining_percent and (tray_data.remain is defined) %}
-            <div class="text-center mb-3">
-              <div class="text-muted small">Remaining</div>
-              <div class="fw-bold">{{ tray_data.remain }}%</div>
-            </div>
-          {% endif %}
-          <div class="d-flex justify-content-center align-items-center" style="min-height: 120px;">
-            <a class="btn btn-warning"
-               href="{{ url_for('assign_bambu_spool', ams=ams_id, tray=tray_id, tag=tray_data.unmapped_bambu_tag) }}">Link to Spoolman</a>
-          </div>
-        </div>
-      {% endif %}
-    </div>
-  </div>
+  {% if tray_data.unmapped_bambu_tag %}
+    <a class="btn btn-warning btn-sm tray-interactive"
+       href="{{ url_for('assign_bambu_spool', ams=ams_id, tray=tray_id, tag=tray_data.unmapped_bambu_tag) }}">Link</a>
+  {% elif amount %}
+    <span class="tray-amount fw-bold">{{ amount }}</span>
+  {% else %}
+    <span class="tray-amount small text-muted">{{ row_action }}</span>
+  {% endif %}
 
-  <div class="card-footer">
-    {% if pick_tray %}
-      <a class="btn btn-primary"
-         href="{{ url_for('tray_load', spool_id=current_spool['id'], tag_id=tag_id, ams=ams_id, tray=tray_id) }}">Assign</a>
-    {% endif %}
-    {% if not pick_tray %}
-      <a class="btn btn-primary"
-         href="{{ url_for('fill', ams=ams_id, tray=tray_id) }}">Fill</a>
-    {% endif %}
-  </div>
+  <i class="bi bi-chevron-right tray-chevron text-muted"></i>
+
+  {% if bar_pct is not none %}
+    <span class="tray-bar">
+      <span class="tray-bar-fill" style="width: {{ bar_pct }}%;{% if rail_color %} background-color: #{{ rail_color }};{% endif %}"></span>
+    </span>
+  {% endif %}
+
+  <a class="stretched-link" href="{{ row_href }}" aria-label="{{ row_action }} slot"></a>
 </div>

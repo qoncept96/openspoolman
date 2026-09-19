@@ -2,7 +2,7 @@
 <html lang="en" data-bs-theme="auto">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="initial-scale=0.8, shrink-to-fit=yes, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="OpenSpoolMan">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -29,21 +29,21 @@
 <body class="page-shell">
 <header class="p-1 mb-3 border-bottom">
   <div class="container">
-    <div class="d-flex flex-wrap align-items-center justify-content-center justify-content-lg-start">
-      <a href="{{ url_for('home') }}" class="d-flex align-items-center mb-2 mb-lg-0 link-body-emphasis text-decoration-none">
-        <img width="40" height="40" alt="OpenSpoolMan Logo" src="{{ url_for('static', filename='logo.png') }}"/>
+    <div class="d-flex flex-nowrap align-items-center app-header-bar">
+      <a href="{{ url_for('home') }}" class="d-flex align-items-center link-body-emphasis text-decoration-none app-header-brand">
+        <img width="28" height="28" alt="OpenSpoolMan Logo" src="{{ url_for('static', filename='logo.png') }}"/>
         {% if PRINTER_NAME %}
-        <h5 style="margin: 0px 5px 5px 5px;">{{ PRINTER_NAME}}</h5>
+        <h6 class="mb-0 ms-2 text-truncate">{{ PRINTER_NAME}}</h6>
         {% else %}
-        <h5 style="margin: 0px 5px 5px 5px;">{{ PRINTER_MODEL["model"]}} - {{PRINTER_MODEL["devicename"]}}</h5>
+        <h6 class="mb-0 ms-2 text-truncate">{{ PRINTER_MODEL["model"]}} - {{PRINTER_MODEL["devicename"]}}</h6>
         {% endif %}
       </a>
-      
-      <ul class="nav col-12 col-lg-auto me-lg-auto mb-2 justify-content-center mb-md-0">
-        <li><a href="{{ url_for('home') }}" class="nav-link px-2 link-body-emphasis">Home</a></li>
-        <li><a href="{{ url_for('assign_tag') }}" class="nav-link px-2 link-body-emphasis">Assign NFC Tag</a></li>
-        <li><a href="{{ url_for('print_history') }}" class="nav-link px-2 link-body-emphasis">Print History</a></li>
-        <li><a href="{{ SPOOLMAN_BASE_URL }}" target="spoolman" class="nav-link px-2 link-body-emphasis">SpoolMan</a></li>
+
+      <ul class="nav flex-nowrap col-auto ms-auto align-items-center">
+        <li><a href="{{ url_for('home') }}" class="nav-link px-2 py-1 small link-body-emphasis" title="Home"><i class="bi bi-house"></i><span class="d-none d-sm-inline ms-1">Home</span></a></li>
+        <li><a href="{{ url_for('assign_tag') }}" class="nav-link px-2 py-1 small link-body-emphasis" title="Assign NFC Tag"><i class="bi bi-tag"></i><span class="d-none d-sm-inline ms-1">Assign NFC Tag</span></a></li>
+        <li><a href="{{ url_for('print_history') }}" class="nav-link px-2 py-1 small link-body-emphasis" title="Print History"><i class="bi bi-clock-history"></i><span class="d-none d-sm-inline ms-1">Print History</span></a></li>
+        <li><a href="{{ SPOOLMAN_BASE_URL }}" target="spoolman" class="nav-link px-2 py-1 small link-body-emphasis" title="SpoolMan"><i class="bi bi-box-seam"></i><span class="d-none d-sm-inline ms-1">SpoolMan</span></a></li>
       </ul>
     </div>
   </div>
