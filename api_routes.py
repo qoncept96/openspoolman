@@ -1,15 +1,17 @@
 import json
 import os
 import traceback
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from flask import Blueprint, jsonify, request
 
 import mqtt_bambulab
+import print_history
 import spoolman_client
 import spoolman_service
 import test_data
-from config import EXTERNAL_SPOOL_AMS_ID, EXTERNAL_SPOOL_ID, PRINTER_ID, PRINTER_NAME
+from config import BASE_URL, EXTERNAL_SPOOL_AMS_ID, EXTERNAL_SPOOL_ID, PRINTER_ID, PRINTER_NAME
 
 API_VERSION = "v1"
 api_bp = Blueprint("api", __name__, url_prefix=f"/api/{API_VERSION}")
@@ -322,3 +324,83 @@ def api_unassign_tray(printer_id: str, tray_index: int):
   except Exception as exc:
     traceback.print_exc()
     return json_error("UNASSIGN_FAILED", f"Failed to unassign tray: {exc}", 500)
+
+
+# ---------------------------------------------------------------------------
+# Prints needing attention
+# ---------------------------------------------------------------------------
+
+#: gcode_states in which a print is still in flight. PAUSE belongs here: a
+#: filament-runout pause can sit for hours and the print is very much alive.
+LIVE_GCODE_STATES = {"RUNNING", "PAUSE", "PREPARE", "SLICING"}
+
+
+def live_print_context() -> Tuple[Optional[int], Optional[str]]:
+  """(live print id, printer gcode_state) from the in-process tracker.
+
+  Used to keep the running print out of the "stuck" bucket. Preferred over any
+  wall-clock heuristic - prints here run from minutes to days, and
+  predicted_end_time is frequently NULL.
+
+  Only correct because the app runs a single gunicorn worker (see Dockerfile).
+  With more workers each would hold its own tracker and only one would be
+  wired to MQTT, so a request served by any other worker would see no live
+  print and report the running one as stuck.
+  """
+  tracker = getattr(mqtt_bambulab, "FILAMENT_TRACKER", None)
+  state = (getattr(tracker, "gcode_state", None) or "").upper() or None
+  print_id = getattr(tracker, "print_id", None)
+  # No state yet means MQTT has told us nothing; trust the tracker rather than
+  # raise a false alarm. A tracker holding a print_id while the printer reports
+  # FINISH/IDLE means the tracker missed the end - that row really is stuck.
+  live_id = print_id if print_id and (state is None or state in LIVE_GCODE_STATES) else None
+  return live_id, state
+
+
+def _attention_item_url(item: Dict[str, Any]) -> Optional[str]:
+  if not BASE_URL:
+    return None
+  base = BASE_URL.rstrip("/")
+  if "orphan" in item["kinds"]:
+    for slot in item["slots"]:
+      if slot.get("spool_id") is None:
+        return (f"{base}/print_select_spool?print_id={item['print_id']}"
+                f"&ams_slot={slot['ams_slot']}&old_spool_id=-1")
+  return f"{base}/print_history?filter=attention"
+
+
+@api_bp.route("/prints/attention", methods=["GET"])
+def prints_attention():
+  """Counts of prints whose filament was used but not properly recorded.
+
+  Drives the Home Assistant chip. Read-only; safe to poll.
+  """
+  try:
+    try:
+      limit = max(1, min(int(request.args.get("limit", 20)), 100))
+    except (TypeError, ValueError):
+      limit = 20
+
+    live_print_id, printer_state = live_print_context()
+    counts = print_history.get_attention_counts(live_print_id)
+    items, truncated = print_history.get_attention_items(live_print_id, limit=limit)
+
+    for item in items:
+      item["url"] = _attention_item_url(item)
+
+    return json_success({
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "counts": counts,
+        # Naive, container-local, exactly as stored. age_seconds is computed
+        # server-side so callers never have to guess this database's timezone.
+        "latest_print_date": print_history.get_latest_print_date(),
+        "latest_print_age_seconds": print_history.get_latest_print_age_seconds(),
+        "live_print_id": live_print_id,
+        "printer_state": printer_state,
+        "mqtt_connected": mqtt_bambulab.isMqttClientConnected(),
+        "truncated": truncated,
+        "items": items,
+    })
+  except Exception as exc:
+    traceback.print_exc()
+    return json_error("ATTENTION_FETCH_FAILED", f"Failed to collect attention data: {exc}", 500)

@@ -96,6 +96,14 @@ def create_database() -> None:
         "estimated_length",
         "REAL",
     )
+    # JSON list of any *other* spools billed for this slot, written when a spool is
+    # swapped out mid-print. The row's own spool_id keeps the first one.
+    _ensure_column(
+        cursor,
+        "filament_usage",
+        "prior_spool_ids",
+        "TEXT",
+    )
 
     # Ensure column definitions exist for older databases
     _ensure_column(
@@ -352,6 +360,298 @@ def get_all_filament_usage_for_print(print_id: int):
   }
   conn.close()
   return results
+
+# ---------------------------------------------------------------------------
+# "Needs attention" buckets
+#
+# A print needs attention when filament came off a spool and the record does not
+# say so. Every predicate below is an EXISTS on `p.id` so the same SQL drives the
+# JSON API, the counts, and the /print_history filter dropdown without being
+# written twice. Named params so the nullable live-print id can be bound once.
+#
+# Status strings are literals on purpose: filament_usage_tracker imports this
+# module, so importing its constants back would be a cycle.
+# See filament_usage_tracker.LAYER_TRACKING_STATUS_*.
+# ---------------------------------------------------------------------------
+
+#: Statuses that mean the print is over, whatever the outcome.
+FINISHED_STATUSES = ("COMPLETED", "ABORTED", "FAILED", "INTERRUPTED")
+
+#: A slot that was never charged to any spool. A COMPLETED print may be judged on
+#: the slicer estimate, but a cancelled or interrupted one needs *measured* length
+#: - charging its full estimate later would bill filament that never extruded.
+_PRED_ORPHAN = """
+EXISTS (
+  SELECT 1 FROM filament_usage f
+  JOIN print_layer_tracking t ON t.print_id = f.print_id
+  WHERE f.print_id = p.id
+    AND f.spool_id IS NULL
+    AND (
+          (t.status = 'COMPLETED'
+           AND (COALESCE(f.length_used, 0) > 0 OR COALESCE(f.estimated_grams, 0) > 0))
+       OR (t.status IN ('ABORTED', 'FAILED', 'INTERRUPTED')
+           AND COALESCE(f.length_used, 0) > 0)
+        )
+)
+"""
+
+#: Left on "Printing" forever, because the container was down when the print ended.
+#: The live print is excluded by id rather than by any wall-clock guess - print
+#: durations here run from minutes to days.
+_PRED_STUCK = """
+EXISTS (
+  SELECT 1 FROM print_layer_tracking t
+  WHERE t.print_id = p.id AND t.status = 'RUNNING'
+)
+AND (:live_print_id IS NULL OR p.id != :live_print_id)
+"""
+
+#: Spool bound, print finished, yet nothing was ever deducted.
+_PRED_UNBILLED = """
+EXISTS (
+  SELECT 1 FROM filament_usage f
+  JOIN print_layer_tracking t ON t.print_id = f.print_id
+  WHERE f.print_id = p.id
+    AND t.status = 'COMPLETED'
+    AND f.spool_id IS NOT NULL
+    AND COALESCE(f.grams_used, 0) <= 0
+    AND COALESCE(f.estimated_grams, 0) > 0
+)
+"""
+
+#: No layer-tracking row at all - the 3MF never parsed, so the other buckets
+#: (which all join that table) cannot see it. Aged out so a print that started
+#: moments ago is not reported before its tracking row exists, and narrowed to
+#: prints that actually have something uncharged: the oldest rows here predate
+#: layer tracking entirely and are already fully accounted for.
+_PRED_UNTRACKED = """
+NOT EXISTS (SELECT 1 FROM print_layer_tracking t WHERE t.print_id = p.id)
+AND p.print_date < datetime('now', 'localtime', '-6 hours')
+AND (
+      NOT EXISTS (SELECT 1 FROM filament_usage f WHERE f.print_id = p.id)
+   OR EXISTS (
+        SELECT 1 FROM filament_usage f
+        WHERE f.print_id = p.id
+          AND (f.spool_id IS NULL OR COALESCE(f.grams_used, 0) <= 0)
+      )
+    )
+"""
+
+#: More than one spool was billed for a single slot, because the spool was swapped
+#: mid-print. The row can only name one of them, so the others are recorded in
+#: prior_spool_ids and the print is flagged for a human.
+_PRED_SPLIT = """
+EXISTS (
+  SELECT 1 FROM filament_usage f
+  WHERE f.print_id = p.id AND f.prior_spool_ids IS NOT NULL
+)
+"""
+
+_BUCKET_PREDICATES = {
+    "orphans": _PRED_ORPHAN,
+    "stuck": _PRED_STUCK,
+    "unbilled": _PRED_UNBILLED,
+    "untracked": _PRED_UNTRACKED,
+    "split": _PRED_SPLIT,
+}
+
+def _pred_attention() -> str:
+  return " OR ".join(f"({sql.strip()})" for sql in _BUCKET_PREDICATES.values())
+
+#: Keys accepted by /print_history?filter= and by the API. "all" is the default
+#: and means no WHERE clause at all.
+ATTENTION_FILTERS = {
+    "all": None,
+    "attention": None,  # filled in below; needs _pred_attention()
+    "orphans": _PRED_ORPHAN,
+    "stuck": _PRED_STUCK,
+    "unbilled": _PRED_UNBILLED,
+    "untracked": _PRED_UNTRACKED,
+    "split": _PRED_SPLIT,
+}
+ATTENTION_FILTERS["attention"] = _pred_attention()
+
+#: Labels for the dropdown, in display order.
+ATTENTION_FILTER_LABELS = (
+    ("all", "All prints"),
+    ("attention", "Needs attention"),
+    ("orphans", "No spool assigned"),
+    ("stuck", "Stuck on printing"),
+    ("unbilled", "Nothing deducted"),
+    ("untracked", "Not tracked"),
+    ("split", "Spool swapped mid-print"),
+)
+
+def resolve_filter(filter_key: str | None) -> str:
+  """Normalise an untrusted ?filter= value to a known key, defaulting to 'all'."""
+  if filter_key in ATTENTION_FILTERS:
+    return filter_key
+  return "all"
+
+
+def get_attention_counts(live_print_id: int | None = None) -> dict:
+  """Counts of prints per bucket, plus the distinct total. Counts prints, not rows:
+  a two-colour print with two orphaned slots is one thing to go and fix."""
+  conn = sqlite3.connect(db_config["db_path"])
+  cursor = conn.cursor()
+  params = {"live_print_id": live_print_id}
+
+  counts = {}
+  for name, predicate in _BUCKET_PREDICATES.items():
+    cursor.execute(f"SELECT COUNT(*) FROM prints p WHERE {predicate}", params)
+    counts[name] = cursor.fetchone()[0]
+
+  cursor.execute(f"SELECT COUNT(*) FROM prints p WHERE {_pred_attention()}", params)
+  counts["total"] = cursor.fetchone()[0]
+
+  conn.close()
+  return counts
+
+
+def get_attention_items(live_print_id: int | None = None, limit: int = 20) -> tuple[list[dict], bool]:
+  """The prints behind the counts, newest first, with enough detail to act on.
+
+  Returns (items, truncated).
+  """
+  conn = sqlite3.connect(db_config["db_path"])
+  conn.row_factory = sqlite3.Row
+  cursor = conn.cursor()
+  params = {"live_print_id": live_print_id, "limit": limit + 1}
+
+  cursor.execute(f"""
+      SELECT p.id AS print_id, p.print_date, p.file_name, p.image_file,
+             t.status, t.layers_printed, t.total_layers, t.predicted_end_time,
+             {_PRED_ORPHAN.strip()} AS is_orphan,
+             {_PRED_STUCK.strip()} AS is_stuck,
+             {_PRED_UNBILLED.strip()} AS is_unbilled,
+             {_PRED_UNTRACKED.strip()} AS is_untracked,
+             {_PRED_SPLIT.strip()} AS is_split
+      FROM prints p
+      LEFT JOIN print_layer_tracking t ON t.print_id = p.id
+      WHERE {_pred_attention()}
+      ORDER BY p.print_date DESC
+      LIMIT :limit
+  """, params)
+  rows = [dict(row) for row in cursor.fetchall()]
+
+  truncated = len(rows) > limit
+  rows = rows[:limit]
+
+  items = []
+  for row in rows:
+    kinds = [k for k in ("orphan", "stuck", "unbilled", "untracked", "split")
+             if row.pop(f"is_{k}")]
+    cursor.execute("""
+        SELECT ams_slot, spool_id, prior_spool_ids, filament_type, color,
+               grams_used, estimated_grams, length_used, estimated_length
+        FROM filament_usage WHERE print_id = ? ORDER BY ams_slot
+    """, (row["print_id"],))
+    row["kinds"] = kinds
+    row["slots"] = [dict(slot) for slot in cursor.fetchall()]
+    items.append(row)
+
+  conn.close()
+  return items, truncated
+
+
+def get_latest_print_date() -> str | None:
+  """Newest print_date, as stored: naive, container-local. Callers that need an
+  age should use get_latest_print_age_seconds() rather than parsing this as UTC."""
+  conn = sqlite3.connect(db_config["db_path"])
+  cursor = conn.cursor()
+  cursor.execute("SELECT MAX(print_date) FROM prints")
+  value = cursor.fetchone()[0]
+  conn.close()
+  return value
+
+
+def get_latest_print_age_seconds() -> float | None:
+  """Seconds since the newest print started, computed server-side so the caller
+  never has to know this database's timezone."""
+  latest = get_latest_print_date()
+  if not latest:
+    return None
+  try:
+    parsed = datetime.strptime(latest, "%Y-%m-%d %H:%M:%S")
+  except ValueError:
+    return None
+  return max(0.0, (datetime.now() - parsed).total_seconds())
+
+
+def get_stale_running_print_ids(exclude_print_ids: list[int] | None = None) -> list[int]:
+  """Prints still marked RUNNING, optionally excluding ones known to be live."""
+  conn = sqlite3.connect(db_config["db_path"])
+  cursor = conn.cursor()
+  query = "SELECT print_id FROM print_layer_tracking WHERE status = 'RUNNING'"
+  params: list[int] = []
+  if exclude_print_ids:
+    placeholders = ",".join("?" for _ in exclude_print_ids)
+    query += f" AND print_id NOT IN ({placeholders})"
+    params.extend(exclude_print_ids)
+  cursor.execute(query, params)
+  ids = [row[0] for row in cursor.fetchall()]
+  conn.close()
+  return ids
+
+
+def close_stale_running_prints(status: str,
+                               exclude_print_ids: list[int] | None = None,
+                               actual_end_time: str | None = None) -> list[int]:
+  """Close RUNNING rows the printer is demonstrably not running any more.
+
+  Returns the print ids that were closed. COALESCE keeps an actual_end_time that
+  somehow already exists.
+  """
+  stale = get_stale_running_print_ids(exclude_print_ids)
+  if not stale:
+    return []
+
+  placeholders = ",".join("?" for _ in stale)
+  conn = sqlite3.connect(db_config["db_path"])
+  cursor = conn.cursor()
+  cursor.execute(f"""
+      UPDATE print_layer_tracking
+      SET status = ?, actual_end_time = COALESCE(actual_end_time, ?)
+      WHERE print_id IN ({placeholders})
+  """, [status, actual_end_time] + stale)
+  conn.commit()
+  conn.close()
+  return stale
+
+
+def record_split_spool(print_id: int, ams_slot: int, spool_id: int) -> None:
+  """Note that `spool_id` was also billed for this slot, on top of the spool the
+  row names. Happens when a spool is swapped out mid-print; the schema has room
+  for only one spool per slot, so the rest are recorded here and surfaced as the
+  'split' bucket rather than silently overwriting the original attribution."""
+  import json
+
+  conn = sqlite3.connect(db_config["db_path"])
+  cursor = conn.cursor()
+  cursor.execute("""
+      SELECT prior_spool_ids FROM filament_usage WHERE print_id = ? AND ams_slot = ?
+  """, (print_id, ams_slot))
+  row = cursor.fetchone()
+  if row is None:
+    conn.close()
+    return
+
+  try:
+    existing = json.loads(row[0]) if row[0] else []
+  except (TypeError, ValueError):
+    existing = []
+  if not isinstance(existing, list):
+    existing = []
+
+  if spool_id not in existing:
+    existing.append(spool_id)
+    cursor.execute("""
+        UPDATE filament_usage SET prior_spool_ids = ?
+        WHERE print_id = ? AND ams_slot = ?
+    """, (json.dumps(existing), print_id, ams_slot))
+    conn.commit()
+  conn.close()
+
 
 # Example for creating the database if it does not exist
 create_database()

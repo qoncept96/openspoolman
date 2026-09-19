@@ -639,16 +639,23 @@ def print_history():
               print_id, ams_slot, round(grams_used, 2),
               length_used=length_used if use_length else None,
           )
-          print_history_service.update_layer_tracking(
-              print_id,
-              filament_grams_billed=round(
+          # update_layer_tracking inserts the row if it is missing, and the schema
+          # defaults status to RUNNING - so assigning a spool to an old print that
+          # never got a tracking row would mint a brand new "Printing" row that can
+          # never close. Stamp COMPLETED in that case; leave an existing row's
+          # status (ABORTED, FAILED, ...) alone.
+          tracking_fields = {
+              "filament_grams_billed": round(
                   sum(
                       _to_float(row.get("grams_used")) or 0
                       for row in (print_history_service.get_all_filament_usage_for_print(print_id) or {}).values()
                   ),
                   2,
               ),
-          )
+          }
+          if not print_history_service.get_layer_tracking_for_prints([print_id]):
+            tracking_fields["status"] = "COMPLETED"
+          print_history_service.update_layer_tracking(print_id, **tracking_fields)
 
   prints, total_prints = print_history_service.get_prints_with_filament(limit=per_page, offset=offset)
   layer_tracking_map = print_history_service.get_layer_tracking_for_prints([print["id"] for print in prints])
