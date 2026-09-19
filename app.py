@@ -564,6 +564,11 @@ def print_history():
   per_page = 50
   offset = max((page - 1) * per_page, 0)
 
+  # Narrow the list to the rows that need fixing. Same predicates the
+  # /api/v1/prints/attention chip counts, so a deep link from it lands on
+  # exactly what it counted.
+  filter_key = print_history_service.resolve_filter(request.args.get("filter"))
+
   ams_slot = request.args.get("ams_slot")
   print_id = request.args.get("print_id")
   spool_id = request.args.get("spool_id")
@@ -659,7 +664,10 @@ def print_history():
             tracking_fields["status"] = "COMPLETED"
           print_history_service.update_layer_tracking(print_id, **tracking_fields)
 
-  prints, total_prints = print_history_service.get_prints_with_filament(limit=per_page, offset=offset)
+  live_print_id, _ = mqtt_bambulab.live_print_context()
+  prints, total_prints = print_history_service.get_prints_with_filament(
+      limit=per_page, offset=offset, filter_key=filter_key, live_print_id=live_print_id,
+  )
   layer_tracking_map = print_history_service.get_layer_tracking_for_prints([print["id"] for print in prints])
 
   spool_list = mqtt_bambulab.fetchSpools()
@@ -726,6 +734,9 @@ def print_history():
     page=page,
     total_pages=total_pages,
     per_page=per_page,
+    filter_key=filter_key,
+    filter_options=print_history_service.ATTENTION_FILTER_LABELS,
+    total_prints=total_prints,
   )
 
 @app.route("/print_select_spool")

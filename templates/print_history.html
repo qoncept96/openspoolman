@@ -82,18 +82,35 @@
 </script>
 
 <!-- Page Title -->
-<h1 class="mb-4 text-center">Print history</h1>
+<h1 class="mb-3 text-center">Print history</h1>
+
+{# Narrow the list to rows that need fixing. The chip on the dashboard deep-links
+   straight to ?filter=attention, so this is also what it lands on. #}
+<div class="d-flex justify-content-center align-items-center gap-2 mb-3">
+  <label for="print-filter" class="form-label mb-0 text-muted small">Show</label>
+  <select id="print-filter" class="form-select form-select-sm w-auto"
+          onchange="location = '{{ url_for('print_history') }}?filter=' + this.value">
+    {% for key, label in filter_options %}
+    <option value="{{ key }}" {% if key == filter_key %}selected{% endif %}>{{ label }}</option>
+    {% endfor %}
+  </select>
+  <span class="text-muted small">{{ total_prints }} print{{ '' if total_prints == 1 else 's' }}</span>
+</div>
+
+{% if filter_key != 'all' and total_prints == 0 %}
+<p class="text-center text-muted">Nothing needs attention here.</p>
+{% endif %}
 {% if total_pages > 1 %}
 <nav aria-label="Print history pagination" class="mb-3">
     <ul class="pagination justify-content-center">
         <li class="page-item {% if page <= 1 %}disabled{% endif %}">
-            <a class="page-link" href="{{ url_for('print_history', page=page-1) }}" aria-label="Previous">Previous</a>
+            <a class="page-link" href="{{ url_for('print_history', page=page-1, filter=filter_key) }}" aria-label="Previous">Previous</a>
         </li>
         <li class="page-item disabled">
             <span class="page-link">Page {{ page }} of {{ total_pages }}</span>
         </li>
         <li class="page-item {% if page >= total_pages %}disabled{% endif %}">
-            <a class="page-link" href="{{ url_for('print_history', page=page+1) }}" aria-label="Next">Next</a>
+            <a class="page-link" href="{{ url_for('print_history', page=page+1, filter=filter_key) }}" aria-label="Next">Next</a>
         </li>
     </ul>
 </nav>
@@ -104,13 +121,13 @@
 <nav aria-label="Print history pagination" class="mt-3">
     <ul class="pagination justify-content-center">
         <li class="page-item {% if page <= 1 %}disabled{% endif %}">
-            <a class="page-link" href="{{ url_for('print_history', page=page-1) }}" aria-label="Previous">Previous</a>
+            <a class="page-link" href="{{ url_for('print_history', page=page-1, filter=filter_key) }}" aria-label="Previous">Previous</a>
         </li>
         <li class="page-item disabled">
             <span class="page-link">Page {{ page }} of {{ total_pages }}</span>
         </li>
         <li class="page-item {% if page >= total_pages %}disabled{% endif %}">
-            <a class="page-link" href="{{ url_for('print_history', page=page+1) }}" aria-label="Next">Next</a>
+            <a class="page-link" href="{{ url_for('print_history', page=page+1, filter=filter_key) }}" aria-label="Next">Next</a>
         </li>
     </ul>
 </nav>

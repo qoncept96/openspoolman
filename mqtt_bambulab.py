@@ -4,7 +4,7 @@ import json
 import ssl
 import traceback
 from threading import Thread
-from typing import Any, Iterable
+from typing import Any, Iterable, Optional, Tuple
 
 import paho.mqtt.client as mqtt
 
@@ -25,7 +25,7 @@ import copy
 from collections.abc import Mapping
 from logger import append_to_rotating_file, log
 from print_history import insert_print, insert_filament_usage
-from filament_usage_tracker import FilamentUsageTracker
+from filament_usage_tracker import LIVE_GCODE_STATES, FilamentUsageTracker
 MQTT_CLIENT = {}  # Global variable storing MQTT Client
 MQTT_CLIENT_CONNECTED = False
 MQTT_KEEPALIVE = 60
@@ -36,6 +36,30 @@ PRINTER_STATE_LAST = {}
 
 PENDING_PRINT_METADATA = {}
 FILAMENT_TRACKER = FilamentUsageTracker()
+
+
+def live_print_context() -> Tuple[Optional[int], Optional[str]]:
+  """(live print id, printer gcode_state) from the in-process tracker.
+
+  Used to keep the running print out of the "stuck" bucket. Preferred over any
+  wall-clock heuristic - prints here run from minutes to days, and
+  predicted_end_time is frequently NULL.
+
+  Only correct because the app runs a single gunicorn worker (see Dockerfile).
+  With more workers each would hold its own tracker and only one would be
+  wired to MQTT, so a request served by any other worker would see no live
+  print and report the running one as stuck.
+  """
+  tracker = FILAMENT_TRACKER
+  state = (getattr(tracker, "gcode_state", None) or "").upper() or None
+  print_id = getattr(tracker, "print_id", None)
+  # No state yet means MQTT has told us nothing; trust the tracker rather than
+  # raise a false alarm. A tracker holding a print_id while the printer reports
+  # FINISH/IDLE means the tracker missed the end - that row really is stuck.
+  live_id = print_id if print_id and (state is None or state in LIVE_GCODE_STATES) else None
+  return live_id, state
+
+
 LOG_FILE = "/home/app/logs/mqtt.log"
 
 def getPrinterModel():

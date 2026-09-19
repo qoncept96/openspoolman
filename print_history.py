@@ -202,17 +202,24 @@ def update_filament_grams_used(print_id: int, filament_id: int, grams_used: floa
     conn.close()
 
 
-def get_prints_with_filament(limit: int | None = None, offset: int | None = None):
+def get_prints_with_filament(limit: int | None = None, offset: int | None = None,
+                             filter_key: str | None = None, live_print_id: int | None = None):
     """
     Retrieves print jobs along with their associated filament usage, grouped by print job.
 
-    A total count is returned to support pagination.
+    A total count is returned to support pagination. `filter_key` is one of
+    ATTENTION_FILTERS and narrows both the page and the count, so the pager stays
+    correct when a filter is applied.
     """
+    where_sql = ATTENTION_FILTERS.get(resolve_filter(filter_key))
+    where_clause = f" WHERE {where_sql}" if where_sql else ""
+    filter_params = {"live_print_id": live_print_id}
+
     conn = sqlite3.connect(db_config["db_path"])
     conn.row_factory = sqlite3.Row  # Enable column name access
 
     count_cursor = conn.cursor()
-    count_cursor.execute("SELECT COUNT(*) FROM prints")
+    count_cursor.execute(f"SELECT COUNT(*) FROM prints p{where_clause}", filter_params)
     total_count = count_cursor.fetchone()[0]
 
     cursor = conn.cursor()
@@ -232,15 +239,18 @@ def get_prints_with_filament(limit: int | None = None, offset: int | None = None
             )) FROM filament_usage f WHERE f.print_id = p.id
         ) AS filament_info
         FROM prints p
+    ''' + where_clause + '''
         ORDER BY p.print_date DESC
     '''
-    params: list[int] = []
+    # Named params throughout so the filter's :live_print_id can coexist with
+    # the pagination values.
+    params: dict = dict(filter_params)
     if limit is not None:
-        query += " LIMIT ?"
-        params.append(limit)
+        query += " LIMIT :limit"
+        params["limit"] = limit
         if offset is not None:
-            query += " OFFSET ?"
-            params.append(offset)
+            query += " OFFSET :offset"
+            params["offset"] = offset
 
     cursor.execute(query, params)
     prints = [dict(row) for row in cursor.fetchall()]
