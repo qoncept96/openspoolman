@@ -55,7 +55,9 @@ def get_filament_order(file):
             switch_count += 1
 
     if len(filament_order) == 0:
-       filament_order = {1:0}
+       # Keys are M620 S<n> values, which are 0-based and are compared against
+       # ams_mapping indices, so a lone filament is 0 - not 1.
+       filament_order = {0:0}
 
     return filament_order
 
