@@ -829,6 +829,9 @@ def print_select_spool():
     old_spool_id = request.args.get("old_spool_id")
     
     change_spool = request.args.get("change_spool", "false").lower() == "true"
+    # Carried so that assigning a spool returns to the same filtered view it was
+    # reached from, instead of dumping you back on page 1 of everything.
+    filter_key = print_history_service.resolve_filter(request.args.get("filter"))
     
     if not old_spool_id:
       old_spool_id = -1
@@ -858,6 +861,7 @@ def print_select_spool():
       print_id=print_id,
       old_spool_id=old_spool_id,
       change_spool=change_spool,
+      filter_key=filter_key,
       materials=materials,
       selected_materials=selected_materials,
     )

@@ -147,12 +147,32 @@
   (function () {
     var REFRESH_MS = 10000;
 
+    /* Never swap markup out from under someone who is mid-interaction: a tap
+       landing on a row that was replaced a frame earlier hits the wrong thing.
+       Covers a focused control, an open popover/modal/dropdown, and anything
+       touched in the last few seconds. */
+    var lastTouch = 0;
+    ['pointerdown', 'keydown'].forEach(function (evt) {
+      document.addEventListener(evt, function () { lastTouch = Date.now(); }, true);
+    });
+
+    function busy(target) {
+      if (Date.now() - lastTouch < 8000) return true;
+      if (document.querySelector('.popover.show, .modal.show, .dropdown-menu.show')) return true;
+      var active = document.activeElement;
+      if (active && active !== document.body && target.contains(active)) return true;
+      var selection = window.getSelection && window.getSelection();
+      if (selection && !selection.isCollapsed) return true;
+      return false;
+    }
+
     /* Replace a container's markup from a fragment route, leaving it alone if
        the server said nothing useful or nothing actually changed (so the DOM is
        not churned under the user's finger every ten seconds). */
     function swap(id, url, after) {
       var target = document.getElementById(id);
       if (!target) return;
+      if (busy(target)) return;
       fetch(url, {cache: 'no-store'})
         .then(function (r) { return r.ok && r.status !== 204 ? r.text() : null; })
         .then(function (html) {
