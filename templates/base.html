@@ -125,6 +125,12 @@
     <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
   </div>
   {% endif %}
+  {% if warning_message %}
+  <div class="alert alert-warning alert-dismissible fade show" role="alert">
+    <strong>Heads up.</strong> {{ warning_message }}
+    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+  </div>
+  {% endif %}
   {% block content %}{% endblock %}
 </main>
 

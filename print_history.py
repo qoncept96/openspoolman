@@ -357,7 +357,7 @@ def get_all_filament_usage_for_print(print_id: int):
   cursor = conn.cursor()
 
   cursor.execute('''
-      SELECT ams_slot, grams_used, length_used FROM filament_usage
+      SELECT ams_slot, grams_used, length_used, spool_id FROM filament_usage
       WHERE print_id = ?
   ''', (print_id,))
 
@@ -365,6 +365,7 @@ def get_all_filament_usage_for_print(print_id: int):
       row["ams_slot"]: {
           "grams_used": row["grams_used"],
           "length_used": row["length_used"],
+          "spool_id": row["spool_id"],
       }
       for row in cursor.fetchall()
   }

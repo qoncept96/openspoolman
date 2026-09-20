@@ -107,6 +107,17 @@ def get_checkpoint_tray_substitutions() -> dict:
   return dict(value) if isinstance(value, dict) else {}
 
 
+def update_checkpoint_mid_print_rebinds(rebinds: dict) -> None:
+  metadata = _get_checkpoint_metadata()
+  metadata["mid_print_rebinds"] = rebinds
+  _save_checkpoint_metadata(metadata)
+
+
+def get_checkpoint_mid_print_rebinds() -> dict:
+  value = _get_checkpoint_metadata().get("mid_print_rebinds")
+  return dict(value) if isinstance(value, dict) else {}
+
+
 def recover_model(task_id, subtask_id):
   metadata = _get_checkpoint_metadata()
 
@@ -254,6 +265,15 @@ class FilamentUsageTracker:
     self._ams_tray_loaded = {}
     self._tray_now_mapping_value = None
     self._tray_substitutions = {}
+    # The spool each history row is attributed to. First spool to be billed for a
+    # slot keeps the row; see _apply_usage_for_filament.
+    self._row_spool_id = {}
+    # (filament_key, spool_id) -> grams / mm, so a slot billed against two spools
+    # can still write the row's own spool's share rather than the combined total.
+    self._grams_by_spool = {}
+    self._length_by_spool = {}
+    # Trays rebound through OpenSpoolMan while this print was running.
+    self._mid_print_rebinds = {}
     # Process-lifetime one-shot, deliberately not reset per print: see
     # _reconcile_stale_running.
     self._startup_reconciled = False
@@ -328,6 +348,48 @@ class FilamentUsageTracker:
       task_id = print_obj.get("task_id")
       subtask_id = print_obj.get("subtask_id")
       self._attempt_print_resume(task_id, subtask_id)
+
+  def is_print_live(self) -> bool:
+    """True when a print is in flight, by the printer's own state."""
+    return (self.gcode_state or "").upper() in LIVE_GCODE_STATES
+
+  def locked_tray_uids(self) -> set:
+    """Trays the running print has claimed. Swapping one of these out mid-print
+    is what silently moves filament onto the wrong spool, so the UI marks them."""
+    if not self.is_print_live():
+      return set()
+    return self._mapped_tray_uids()
+
+  def note_tray_rebind(self, tray_uid: str | None, outgoing_spool_id) -> bool:
+    """Record that `tray_uid` was rebound through OpenSpoolMan mid-print.
+
+    Billing for that tray stays pinned to the spool that was on it, so a swap
+    made to stage the next job cannot take over this print's usage. Returns True
+    if the tray belonged to the running print.
+
+    Only rebinds that go through this app create a pin. Editing
+    extra.active_tray directly in Spoolman deliberately does not, so the
+    mid-print runout rescue - point the backup spool at the original tray uid -
+    keeps working.
+    """
+    if not tray_uid or not self.is_print_live():
+      return False
+    if tray_uid not in self._mapped_tray_uids():
+      # Not part of this print, but remember it anyway: the runout-follow logic
+      # must not mistake a freshly staged spool for the printer's own backup.
+      # None as the pin means "not billed by this print", which _lookup_spool_for_tray
+      # skips, so staging a spool here changes no billing.
+      if tray_uid not in self._mid_print_rebinds:
+        self._mid_print_rebinds[tray_uid] = None
+        update_checkpoint_mid_print_rebinds(self._mid_print_rebinds)
+      return False
+
+    if tray_uid not in self._mid_print_rebinds:
+      self._mid_print_rebinds[tray_uid] = outgoing_spool_id
+      update_checkpoint_mid_print_rebinds(self._mid_print_rebinds)
+      log(f"[filament-tracker] Tray {tray_uid} rebound mid-print; billing stays with "
+          f"spool {outgoing_spool_id} until this print ends")
+    return True
 
   def _reconcile_stale_running(self, observed_state: str | None) -> None:
     """Close print rows left on RUNNING because the container was down at the finish.
@@ -664,9 +726,31 @@ class FilamentUsageTracker:
 
     consumeSpool(spool_id, use_length=usage_rounded)
 
+    # Per-spool tallies. A slot can be billed against more than one spool when the
+    # spool is swapped mid-print, and filament_usage has room for only one.
+    spool_key = (filament_key, spool_id)
+    self._grams_by_spool[spool_key] = self._grams_by_spool.get(spool_key, 0.0) + usage_grams
+    self._length_by_spool[spool_key] = self._length_by_spool.get(spool_key, 0.0) + usage_rounded
+
+    # First spool billed owns the row. Writing the live one instead would let a
+    # single tail layer after a swap re-stamp the whole slot - including every
+    # gram the previous spool actually printed - onto the next job's spool, while
+    # Spoolman's own deductions stayed where they were.
+    row_spool_id = self._row_spool_id.setdefault(filament_key, spool_id)
+
     if self.print_id:
-      update_filament_spool(self.print_id, filament_key, spool_id)
-      update_filament_grams_used(self.print_id, filament_key, grams_rounded, length_used=cumulative_length)
+      if spool_id != row_spool_id:
+        log(f"[filament-tracker] Slot {filament_key} was also billed to spool {spool_id}; "
+            f"the history row stays with spool {row_spool_id}")
+        record_split_spool(self.print_id, filament_key, spool_id)
+      else:
+        update_filament_spool(self.print_id, filament_key, row_spool_id)
+      row_key = (filament_key, row_spool_id)
+      update_filament_grams_used(
+          self.print_id, filament_key,
+          round(self._grams_by_spool.get(row_key, 0.0), 2),
+          length_used=round(self._length_by_spool.get(row_key, 0.0), 5),
+      )
 
     self._filament_spool_id_map[filament] = spool_id
     self._spool_data_cache[spool_id] = spool_data
@@ -709,6 +793,15 @@ class FilamentUsageTracker:
     self._pending_usage_mm = {}
     self._mc_remaining_time_minutes = None
     self._tray_substitutions = {}
+    self._row_spool_id = {}
+    self._grams_by_spool = {}
+    self._length_by_spool = {}
+    self._mid_print_rebinds = {}
+    # Tray presence and tray_now belong to the print that just ended; leaving them
+    # behind would let the next print substitute on last print's evidence before
+    # its own first AMS report lands.
+    self._ams_tray_loaded = {}
+    self._tray_now_mapping_value = None
     self.cumulative_length_used = {}
     self.cumulative_grams_used = {}
 
@@ -859,9 +952,22 @@ class FilamentUsageTracker:
     if target_print_id is None:
       self._layer_tracking_status = status
 
-  def _tray_uid_from_mapping(self, mapping_value: int) -> str | None:
+  def _tray_uid_from_mapping(self, mapping_value) -> str | None:
     if mapping_value == EXTERNAL_SPOOL_ID:
       return trayUid(EXTERNAL_SPOOL_AMS_ID, EXTERNAL_SPOOL_ID)
+
+    # Real mappings are padded: map_filament leaves None for slots it has not
+    # resolved yet, and the cloud path uses -1 for unused ones. Both used to
+    # reach getAMSFromTray and raise, and the exception escaped all the way out
+    # of on_message, killing every other handler for that MQTT message.
+    if mapping_value is None:
+      return None
+    try:
+      mapping_value = int(mapping_value)
+    except (TypeError, ValueError):
+      return None
+    if mapping_value < 0:
+      return None
 
     ams_id = getAMSFromTray(mapping_value)
     tray_id = mapping_value - ams_id * 4
@@ -913,6 +1019,14 @@ class FilamentUsageTracker:
 
     substitute = self._tray_substitutions.get(tray_uid)
     if substitute:
+      # Re-check rather than trust it forever: if the original tray is loaded
+      # again the decision is stale, and previously nothing could undo it short
+      # of aborting the print.
+      if self._ams_tray_loaded.get(tray_uid) is True:
+        log(f"[filament-tracker] Tray {tray_uid} has filament again; dropping substitution to {substitute}")
+        self._tray_substitutions.pop(tray_uid, None)
+        update_checkpoint_tray_substitutions(self._tray_substitutions)
+        return tray_uid
       return substitute
 
     # Only ever reconsider a tray the printer reports as holding no filament.
@@ -930,6 +1044,15 @@ class FilamentUsageTracker:
     if current_uid in self._mapped_tray_uids():
       return tray_uid
 
+    # A tray rebound through OpenSpoolMan during this print is the next job being
+    # staged, not a backup the printer chose. Following it would bill this print
+    # to the next job's spool. This is the common case for the guard above to
+    # miss, because staging happens in a spare slot outside the print's mapping.
+    if current_uid in self._mid_print_rebinds:
+      log(f"[filament-tracker] Tray {tray_uid} is empty but {current_uid} was rebound "
+          f"mid-print; not following it")
+      return tray_uid
+
     log(f"[filament-tracker] Tray {tray_uid} is empty; printer switched to {current_uid}, following it")
     self._tray_substitutions[tray_uid] = current_uid
     update_checkpoint_tray_substitutions(self._tray_substitutions)
@@ -944,6 +1067,13 @@ class FilamentUsageTracker:
     return EXTERNAL_SPOOL_ID
 
   def _lookup_spool_for_tray(self, tray_uid: str):
+    # A tray rebound mid-print stays billed to the spool that was on it when the
+    # print started. Otherwise the live Spoolman read below would find the next
+    # job's spool and charge this print's filament to it.
+    pinned = self._mid_print_rebinds.get(tray_uid)
+    if pinned is not None:
+      return pinned
+
     for spool in fetchSpools():
       extra = spool.get("extra") or {}
       active = extra.get("active_tray")
@@ -990,17 +1120,30 @@ class FilamentUsageTracker:
     self._tray_substitutions = get_checkpoint_tray_substitutions()
     if self._tray_substitutions:
       log(f"[filament-tracker] Recovered tray substitutions {self._tray_substitutions}")
+    self._mid_print_rebinds = get_checkpoint_mid_print_rebinds()
+    if self._mid_print_rebinds:
+      log(f"[filament-tracker] Recovered mid-print rebinds {self._mid_print_rebinds}")
     
     # Initialize cumulative usage from database to continue tracking correctly
     self.cumulative_grams_used = {}
     self.cumulative_length_used = {}
+    self._row_spool_id = {}
+    self._grams_by_spool = {}
+    self._length_by_spool = {}
     if self.print_id:
       existing_usage = get_all_filament_usage_for_print(self.print_id)
       for ams_slot, usage in existing_usage.items():
         grams_value = usage.get("grams_used") if isinstance(usage, dict) else usage
         length_value = usage.get("length_used") if isinstance(usage, dict) else None
+        spool_value = usage.get("spool_id") if isinstance(usage, dict) else None
         if grams_value is not None:
           self.cumulative_grams_used[ams_slot] = grams_value
         if length_value is not None:
           self.cumulative_length_used[ams_slot] = length_value
+        # Restore which spool owns the row, or the first spool billed after the
+        # restart would take it over and undo the first-spool-wins rule.
+        if spool_value is not None:
+          self._row_spool_id[ams_slot] = spool_value
+          self._grams_by_spool[(ams_slot, spool_value)] = grams_value or 0.0
+          self._length_by_spool[(ams_slot, spool_value)] = length_value or 0.0
         log(f"[filament-tracker] Resumed cumulative usage for filament {ams_slot}: {grams_value}g, {length_value or 0}mm")

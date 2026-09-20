@@ -184,9 +184,11 @@ def fill():
       return render_template('error.html', exception="Live read-only mode: assigning spools to trays is disabled.")
 
     spool_data = spoolman_client.getSpoolById(spool_id)
-    mqtt_bambulab.setActiveTray(spool_id, spool_data["extra"], ams_id, tray_id)
+    locked = mqtt_bambulab.setActiveTray(spool_id, spool_data["extra"], ams_id, tray_id)
     setActiveSpool(ams_id, tray_id, spool_data)
-    return redirect(url_for('home', success_message=f"Updated Spool ID {spool_id} to AMS {ams_id}, Tray {tray_id}."))
+    return redirect(url_for('home',
+                            success_message=f"Updated Spool ID {spool_id} to AMS {ams_id}, Tray {tray_id}.",
+                            warning_message=_mid_print_rebind_warning(locked, tray_id)))
   else:
     spools = mqtt_bambulab.fetchSpools()
 
@@ -243,10 +245,12 @@ def assign_bambu_spool():
       "tag": json.dumps(bambu_tag),
     })
 
-    mqtt_bambulab.setActiveTray(spool_id, extras, ams_id, tray_id)
+    locked = mqtt_bambulab.setActiveTray(spool_id, extras, ams_id, tray_id)
     setActiveSpool(ams_id, tray_id, spool_data)
 
-    return redirect(url_for('home', success_message=f"Linked Bambu spool to SpoolMan spool {spool_id} on AMS {ams_id}, Tray {tray_id}."))
+    return redirect(url_for('home',
+                            success_message=f"Linked Bambu spool to SpoolMan spool {spool_id} on AMS {ams_id}, Tray {tray_id}.",
+                            warning_message=_mid_print_rebind_warning(locked, tray_id)))
 
   spools = mqtt_bambulab.fetchSpools()
   materials = extract_materials(spools)
@@ -382,10 +386,12 @@ def tray_load():
   try:
     # Update Spoolman with the selected tray
     spool_data = spoolman_client.getSpoolById(spool_id)
-    mqtt_bambulab.setActiveTray(spool_id, spool_data["extra"], ams_id, tray_id)
+    locked = mqtt_bambulab.setActiveTray(spool_id, spool_data["extra"], ams_id, tray_id)
     setActiveSpool(ams_id, tray_id, spool_data)
 
-    return redirect(url_for('home', success_message=f"Updated Spool ID {spool_id} with TAG id {tag_id} to AMS {ams_id}, Tray {tray_id}."))
+    return redirect(url_for('home',
+                            success_message=f"Updated Spool ID {spool_id} with TAG id {tag_id} to AMS {ams_id}, Tray {tray_id}.",
+                            warning_message=_mid_print_rebind_warning(locked, tray_id)))
   except Exception as e:
     traceback.print_exc()
     return render_template('error.html', exception=str(e))
@@ -448,6 +454,7 @@ def home():
     vt_tray_data = last_ams_config.get("vt_tray", {})
     spool_list = mqtt_bambulab.fetchSpools()
     success_message = request.args.get("success_message")
+    warning_message = request.args.get("warning_message")
     
     issue = False
     #TODO: Fix issue when external spool info is reset via bambulab interface
@@ -460,10 +467,28 @@ def home():
         issue |= tray["issue"]
 
     ams_labels = build_ams_labels(ams_data)
-    return render_template('index.html', success_message=success_message, ams_data=ams_data, vt_tray_data=vt_tray_data, issue=issue, ams_labels=ams_labels)
+    return render_template('index.html', success_message=success_message, warning_message=warning_message, ams_data=ams_data, vt_tray_data=vt_tray_data, issue=issue, ams_labels=ams_labels)
   except Exception as e:
     traceback.print_exc()
     return render_template('error.html', exception=str(e))
+
+def _mid_print_rebind_warning(locked, tray_id):
+  """Message shown after rebinding a tray the running print is using.
+
+  The rebind is never blocked - nothing new should stop you at the printer - but
+  you get told, because this is the swap that used to move the whole slot's
+  filament onto the next job's spool.
+  """
+  if not locked:
+    return None
+  try:
+    channel = int(tray_id) + 1
+  except (TypeError, ValueError):
+    channel = tray_id
+  return (f"Channel {channel} is in use by the running print. Its filament stays "
+          f"charged to the spool that was on it, so this print's numbers stay "
+          f"right; the new spool takes over when the print ends.")
+
 
 def sort_spools(spools):
   def condition(item):

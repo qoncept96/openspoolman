@@ -435,20 +435,38 @@ def spendFilaments(printdata):
         
 
 def setActiveTray(spool_id, spool_extra, ams_id, tray_id):
+  """Bind a spool to a tray. Returns True when this happened mid-print on a tray
+  the running print is using, so the caller can say so."""
   if spool_extra is None:
     spool_extra = {}
 
+  locked = False
   if not spool_extra.get("active_tray") or json.loads(spool_extra.get("active_tray")) != trayUid(ams_id, tray_id):
     spoolman_client.patchExtraTags(spool_id, spool_extra, {
       "active_tray": json.dumps(trayUid(ams_id, tray_id)),
     })
 
     # Remove active tray from inactive spools
+    outgoing_spool_id = None
     for old_spool in fetchSpools(cached=False):
       if int(spool_id) != old_spool["id"] and old_spool.get("extra") and old_spool["extra"].get("active_tray") and json.loads(old_spool["extra"]["active_tray"]) == trayUid(ams_id, tray_id):
+        outgoing_spool_id = old_spool["id"]
         spoolman_client.patchExtraTags(old_spool["id"], old_spool["extra"], {"active_tray": json.dumps("")})
+
+    # Every binding change funnels through here - the NFC tap, /fill, the API and
+    # the RFID auto-bind - so this is the one place that can notice a swap made
+    # while a print is running and stop it taking over that print's billing.
+    # Imported late: mqtt_bambulab imports this module.
+    try:
+      import mqtt_bambulab
+      locked = mqtt_bambulab.FILAMENT_TRACKER.note_tray_rebind(
+          trayUid(ams_id, tray_id), outgoing_spool_id)
+    except Exception:
+      log("Could not record mid-print rebind")
   else:
     log("Skipping set active tray")
+
+  return locked
 
 # Fetch spools from spoolman
 def fetchSpools(cached=False):
