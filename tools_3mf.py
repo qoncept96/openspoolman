@@ -1,4 +1,5 @@
 import requests
+import threading
 import zipfile
 import tempfile
 import xml.etree.ElementTree as ET
@@ -66,6 +67,13 @@ def download3mfFromCloud(url, destFile):
   destFile.write(response.content)
 
 def download3mfFromFTP(filename, destFile):
+  # Serialised: see FTP_LOCK. A print's own download must never queue behind or
+  # overlap with a bulk one.
+  with FTP_LOCK:
+    return _download3mfFromFTP(filename, destFile)
+
+
+def _download3mfFromFTP(filename, destFile):
   log("Downloading 3MF file from FTP...")
   ftp_host = PRINTER_IP
   ftp_user = "bblp"
@@ -164,9 +172,24 @@ def download3mfFromFTP(filename, destFile):
         pass
   return False
 
+#: Only one FTP transfer at a time. The P1S serves FTPS from the same board that
+#: talks MQTT, and it drops off the network for the duration of a transfer - which
+#: is why the printer goes "offline" in Home Assistant at every print start. Two
+#: overlapping transfers means two outages back to back, or a stall, so the bulk
+#: thumbnail recovery can never run on top of a print's own download.
+FTP_LOCK = threading.Lock()
+
+
 def setupPycurlConnection(ftp_user, ftp_pass):
   # Setup shared options for curl connections
   c = pycurl.Curl()
+
+  # Without these a stalled transfer holds the printer for minutes. The printer is
+  # unreachable for other things while it serves FTP, so a hung handle is not just a
+  # slow download - it is the printer missing from the network.
+  c.setopt(c.CONNECTTIMEOUT, 15)
+  c.setopt(c.LOW_SPEED_LIMIT, 100)   # bytes/sec ...
+  c.setopt(c.LOW_SPEED_TIME, 30)     # ... sustained for this long, or give up
 
   # 🔹 Setup explicit FTPS connection (like FileZilla)
   
