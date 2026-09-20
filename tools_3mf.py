@@ -307,22 +307,38 @@ def getMetaDataFrom3mf(url):
               if meta.attrib.get("key") == "index":
                   metadata["plateID"] = meta.attrib.get("value", "")
 
+            # slice_info gives every filament the slicer's own index, and so does everything
+            # downstream: the gcode's M620 S<n>, the printer's ams_mapping, and the
+            # filament_usage rows keyed off these ids. Renumbering them 1..N by position only
+            # agreed with the rest when a plate happened to start at filament 1 - print 69 was
+            # sliced on filament 2, so the tracker billed slot 2 against a row written as slot
+            # 1, matched nothing, and the print went uncharged.
             usage = {}
-            filaments= {}
-            filamentId = 1
-            for plate in root.findall(".//plate"):
+            filaments = {}
+            plate_id = metadata.get("plateID")
+            plates = [
+              plate for plate in root.findall(".//plate")
+              if any(meta.attrib.get("key") == "index" and meta.attrib.get("value") == plate_id
+                     for meta in plate.findall("./metadata"))
+            ] or root.findall(".//plate")
+            next_id = 1
+            for plate in plates:
               for filament in plate.findall(".//filament"):
                 used_g = filament.attrib.get("used_g")
-                #filamentId = int(filament.attrib.get("id"))
-                
+                try:
+                  filamentId = int(filament.attrib.get("id"))
+                except (TypeError, ValueError):
+                  # A 3MF missing the attribute should still produce rows to bill against.
+                  filamentId = next_id
+                next_id = filamentId + 1
+
                 usage[filamentId] = used_g
                 filaments[filamentId] = {"id": filamentId,
-                                         "tray_info_idx": filament.attrib.get("tray_info_idx"), 
-                                         "type":filament.attrib.get("type"), 
-                                         "color": filament.attrib.get("color"), 
-                                         "used_g": used_g, 
+                                         "tray_info_idx": filament.attrib.get("tray_info_idx"),
+                                         "type":filament.attrib.get("type"),
+                                         "color": filament.attrib.get("color"),
+                                         "used_g": used_g,
                                          "used_m":filament.attrib.get("used_m")}
-                filamentId += 1
 
             metadata["filaments"] = filaments
             metadata["usage"] = usage
