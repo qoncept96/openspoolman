@@ -699,6 +699,21 @@ class FilamentUsageTracker:
       self._pending_usage_mm[filament] = self._pending_usage_mm.get(filament, 0.0) + total_mm
       return False
 
+    # Never charge a spool we cannot also record the charge against. Without this
+    # the deduction lands in Spoolman while filament_usage keeps grams_used = 0 and
+    # spool_id NULL, so the print later looks like it was never billed - and
+    # assigning a spool to it by hand charges the same filament a second time.
+    # That is exactly how a spool got double-deducted on 2026-09-19.
+    # Queue it instead: _flush_all_pending_usage retries every layer, so as soon as
+    # print_id arrives the backlog bills correctly. If it never arrives there is no
+    # history row either, which is the "missed the print start" case the dashboard
+    # ghost-print check is there to catch.
+    if not self.print_id:
+      log(f"[filament-tracker] Holding {round(total_mm, 5)}mm for filament {filament}: "
+          f"no print_id yet, so the charge could not be recorded")
+      self._pending_usage_mm[filament] = self._pending_usage_mm.get(filament, 0.0) + total_mm
+      return False
+
     spool_data = self._spool_data_cache.get(spool_id)
     if spool_data is None:
       spool_data = self._get_spool_data(spool_id)
@@ -738,19 +753,18 @@ class FilamentUsageTracker:
     # Spoolman's own deductions stayed where they were.
     row_spool_id = self._row_spool_id.setdefault(filament_key, spool_id)
 
-    if self.print_id:
-      if spool_id != row_spool_id:
-        log(f"[filament-tracker] Slot {filament_key} was also billed to spool {spool_id}; "
-            f"the history row stays with spool {row_spool_id}")
-        record_split_spool(self.print_id, filament_key, spool_id)
-      else:
-        update_filament_spool(self.print_id, filament_key, row_spool_id)
-      row_key = (filament_key, row_spool_id)
-      update_filament_grams_used(
-          self.print_id, filament_key,
-          round(self._grams_by_spool.get(row_key, 0.0), 2),
-          length_used=round(self._length_by_spool.get(row_key, 0.0), 5),
-      )
+    if spool_id != row_spool_id:
+      log(f"[filament-tracker] Slot {filament_key} was also billed to spool {spool_id}; "
+          f"the history row stays with spool {row_spool_id}")
+      record_split_spool(self.print_id, filament_key, spool_id)
+    else:
+      update_filament_spool(self.print_id, filament_key, row_spool_id)
+    row_key = (filament_key, row_spool_id)
+    update_filament_grams_used(
+        self.print_id, filament_key,
+        round(self._grams_by_spool.get(row_key, 0.0), 2),
+        length_used=round(self._length_by_spool.get(row_key, 0.0), 5),
+    )
 
     self._filament_spool_id_map[filament] = spool_id
     self._spool_data_cache[spool_id] = spool_data
