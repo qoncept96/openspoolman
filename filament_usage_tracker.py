@@ -12,7 +12,7 @@ from config import EXTERNAL_SPOOL_AMS_ID, EXTERNAL_SPOOL_ID, TRACK_LAYER_USAGE
 from spoolman_client import consumeSpool
 from spoolman_service import fetchSpools, getAMSFromTray, trayUid
 from tools_3mf import download3mfFromCloud, download3mfFromFTP, download3mfFromLocalFilesystem
-from print_history import update_filament_spool, update_filament_grams_used, get_all_filament_usage_for_print, update_layer_tracking, close_stale_running_prints, record_split_spool
+from print_history import update_filament_spool, update_filament_grams_used, get_all_filament_usage_for_print, update_layer_tracking, close_stale_running_prints, record_split_spool, get_filament_for_slot
 from logger import log
 
 
@@ -274,6 +274,9 @@ class FilamentUsageTracker:
     self._length_by_spool = {}
     # Trays rebound through OpenSpoolMan while this print was running.
     self._mid_print_rebinds = {}
+    #: Slots confirmed to have a filament_usage row, so the check above costs one
+    #: query per slot per print rather than one per layer.
+    self._known_slots = set()
     # Process-lifetime one-shot, deliberately not reset per print: see
     # _reconcile_stale_running.
     self._startup_reconciled = False
@@ -714,6 +717,22 @@ class FilamentUsageTracker:
       self._pending_usage_mm[filament] = self._pending_usage_mm.get(filament, 0.0) + total_mm
       return False
 
+    # ...and the row has to actually exist. filament_usage rows are keyed by the
+    # slice_info filament id, while billing is keyed by the gcode's tool index, and
+    # the two disagree whenever ams_mapping is sparse (seen live on print 67:
+    # mapping [-1,-1,0,-1,-1], so tool index 2 billed against a row numbered 1).
+    # update_filament_grams_used would then match no row and silently do nothing,
+    # leaving the charge in Spoolman only - the same trap as above.
+    filament_key = filament + 1
+    if filament_key not in self._known_slots:
+      if get_filament_for_slot(self.print_id, filament_key) is None:
+        log(f"[filament-tracker] Holding {round(total_mm, 5)}mm for filament {filament}: "
+            f"print {self.print_id} has no filament_usage row for slot {filament_key}, "
+            f"so the charge could not be recorded")
+        self._pending_usage_mm[filament] = self._pending_usage_mm.get(filament, 0.0) + total_mm
+        return False
+      self._known_slots.add(filament_key)
+
     spool_data = self._spool_data_cache.get(spool_id)
     if spool_data is None:
       spool_data = self._get_spool_data(spool_id)
@@ -729,7 +748,6 @@ class FilamentUsageTracker:
     usage_grams = self._mm_to_grams(total_mm, diameter_mm, density)
 
     usage_rounded = round(total_mm, 5)
-    filament_key = filament + 1
     previous_grams = self.cumulative_grams_used.get(filament_key, 0.0)
     self.cumulative_grams_used[filament_key] = previous_grams + usage_grams
     previous_length = self.cumulative_length_used.get(filament_key, 0.0)
@@ -811,6 +829,7 @@ class FilamentUsageTracker:
     self._grams_by_spool = {}
     self._length_by_spool = {}
     self._mid_print_rebinds = {}
+    self._known_slots = set()
     # Tray presence and tray_now belong to the print that just ended; leaving them
     # behind would let the next print substitute on last print's evidence before
     # its own first AMS report lands.
