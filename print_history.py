@@ -388,9 +388,17 @@ def get_all_filament_usage_for_print(print_id: int):
 #: Statuses that mean the print is over, whatever the outcome.
 FINISHED_STATUSES = ("COMPLETED", "ABORTED", "FAILED", "INTERRUPTED")
 
-#: A slot that was never charged to any spool. A COMPLETED print may be judged on
-#: the slicer estimate, but a cancelled or interrupted one needs *measured* length
-#: - charging its full estimate later would bill filament that never extruded.
+#: A slot that was never charged to any spool.
+#:
+#: COMPLETED and INTERRUPTED count on the slicer estimate alone. INTERRUPTED
+#: means our own bookkeeping missed the finish, not that the print stopped
+#: early, so the filament almost certainly did go through - and leaving it out
+#: would hide exactly the prints this tool exists to catch. ABORTED and FAILED
+#: need *measured* length: those really did stop part way, and their estimate
+#: describes filament that was never extruded.
+#:
+#: Nothing is charged from this bucket. It only decides what gets surfaced; the
+#: deduction happens when a spool is picked by hand.
 _PRED_ORPHAN = """
 EXISTS (
   SELECT 1 FROM filament_usage f
@@ -398,9 +406,9 @@ EXISTS (
   WHERE f.print_id = p.id
     AND f.spool_id IS NULL
     AND (
-          (t.status = 'COMPLETED'
+          (t.status IN ('COMPLETED', 'INTERRUPTED')
            AND (COALESCE(f.length_used, 0) > 0 OR COALESCE(f.estimated_grams, 0) > 0))
-       OR (t.status IN ('ABORTED', 'FAILED', 'INTERRUPTED')
+       OR (t.status IN ('ABORTED', 'FAILED')
            AND COALESCE(f.length_used, 0) > 0)
         )
 )
