@@ -72,7 +72,12 @@ def download3mfFromFTP(filename, destFile):
   ftp_pass = PRINTER_CODE
   local_path = destFile.name  # 🔹 Download into the current directory
   base_name = os.path.basename(filename)
-  remote_paths = [f"/cache/{base_name}", f"/{base_name}", f"/sdcard/{base_name}"]
+  # Root first. Slicer project files land in the FTP root; /cache/ holds the
+  # plate gcode, not the .3mf. Probing /cache/ first meant every download paid a
+  # guaranteed miss, and the printer's FTPS server leaves the handle unusable
+  # after one (see reconnect_codes below), so that miss costs a full reconnect -
+  # minutes per file when fetching in bulk.
+  remote_paths = [f"/{base_name}", f"/cache/{base_name}", f"/sdcard/{base_name}"]
 
   max_retries = 6
   last_err_code = None

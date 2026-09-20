@@ -18,7 +18,7 @@ from config import (
     CLEAR_ASSIGNMENT_WHEN_EMPTY,
 )
 from messages import GET_VERSION, PUSH_ALL, AMS_FILAMENT_SETTING
-from spoolman_service import spendFilaments, setActiveTray, fetchSpools, clear_active_spool_for_tray
+from spoolman_service import spendFilaments, setActiveTray, fetchSpools, clear_active_spool_for_tray, getAMSFromTray
 from tools_3mf import getMetaDataFrom3mf
 import time
 import copy
@@ -58,6 +58,88 @@ def live_print_context() -> Tuple[Optional[int], Optional[str]]:
   # FINISH/IDLE means the tracker missed the end - that row really is stuck.
   live_id = print_id if print_id and (state is None or state in LIVE_GCODE_STATES) else None
   return live_id, state
+
+
+def _spool_label(spool: dict) -> str:
+  """How a spool is named on screen: vendor and colour, never its database id."""
+  filament = (spool or {}).get("filament") or {}
+  vendor = ((filament.get("vendor") or {}).get("name") or "").strip()
+  name = (filament.get("name") or "").strip()
+  label = " ".join(part for part in (vendor, name) if part)
+  return label or "Unknown spool"
+
+
+def current_print_summary() -> dict:
+  """What is printing right now and which trays it has claimed.
+
+  Feeds the banner shown on every page. The locked trays are the point of it:
+  pulling one of those mid-print is what used to move filament onto the wrong
+  spool, so it needs to be visible before you reach for the spool, not after.
+  """
+  tracker = FILAMENT_TRACKER
+  print_obj = (PRINTER_STATE or {}).get("print") or {}
+  live_id, state = live_print_context()
+  live = tracker.is_print_live()
+
+  summary = {
+      "live": live,
+      "print_id": live_id,
+      "state": state,
+      "file_name": print_obj.get("subtask_name") or print_obj.get("gcode_file") or "",
+      "current_layer": print_obj.get("layer_num"),
+      "total_layers": print_obj.get("total_layer_num"),
+      "percent": print_obj.get("mc_percent"),
+      "remaining_minutes": print_obj.get("mc_remaining_time"),
+      "slots": [],
+  }
+  if not live:
+    return summary
+
+  locked = tracker.locked_tray_uids()
+  mapping = tracker.ams_mapping or []
+  metadata_filaments = (tracker.print_metadata or {}).get("filaments") or {}
+
+  try:
+    spools = fetchSpools()
+  except Exception:
+    spools = []
+  spools_by_tray = {}
+  for spool in spools:
+    active_tray = ((spool.get("extra") or {}).get("active_tray") or "").strip('"')
+    if active_tray:
+      spools_by_tray[active_tray] = spool
+
+  for index, mapping_value in enumerate(mapping):
+    tray_uid = tracker._tray_uid_from_mapping(mapping_value)
+    if tray_uid is None:
+      continue
+    filament_key = index + 1
+    pinned_spool_id = tracker._mid_print_rebinds.get(tray_uid)
+    spool = spools_by_tray.get(tray_uid)
+    meta = metadata_filaments.get(filament_key) or metadata_filaments.get(str(filament_key)) or {}
+
+    try:
+      estimated = float(meta.get("used_g")) if meta.get("used_g") is not None else None
+    except (TypeError, ValueError):
+      estimated = None
+
+    summary["slots"].append({
+        # Channel, not tray id: the slots are labelled 1-4 on the machine.
+        "channel": (mapping_value - getAMSFromTray(mapping_value) * 4 + 1)
+                   if mapping_value != EXTERNAL_SPOOL_ID else None,
+        "external": mapping_value == EXTERNAL_SPOOL_ID,
+        "tray_uid": tray_uid,
+        "filament_type": meta.get("type") or "",
+        "color": (meta.get("color") or "").lstrip("#")[:6],
+        "spool_label": _spool_label(spool) if spool else None,
+        "grams_used": round(tracker.cumulative_grams_used.get(filament_key, 0.0), 1),
+        "estimated_grams": estimated,
+        "locked": tray_uid in locked,
+        # Billing pinned because the spool was swapped out while printing.
+        "pinned": pinned_spool_id is not None,
+    })
+
+  return summary
 
 
 LOG_FILE = "/home/app/logs/mqtt.log"

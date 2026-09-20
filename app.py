@@ -48,6 +48,16 @@ if not USE_TEST_DATA:
 
 app = Flask(__name__)
 
+
+@app.context_processor
+def inject_current_print():
+  """Every template gets print_summary, so base.html can render the banner on
+  first paint rather than waiting a poll interval for it to appear."""
+  try:
+    return {"print_summary": mqtt_bambulab.current_print_summary()}
+  except Exception:
+    return {"print_summary": None}
+
 @app.context_processor
 def fronted_utilities():
   printer_model = mqtt_bambulab.getPrinterModel() or {}
@@ -449,28 +459,58 @@ def home():
     return render_template('error.html', exception="MQTT is disconnected. Is the printer online?")
 
   try:
-    last_ams_config = mqtt_bambulab.getLastAMSConfig()
-    ams_data = last_ams_config.get("ams", [])
-    vt_tray_data = last_ams_config.get("vt_tray", {})
-    spool_list = mqtt_bambulab.fetchSpools()
-    success_message = request.args.get("success_message")
-    warning_message = request.args.get("warning_message")
-    
-    issue = False
-    #TODO: Fix issue when external spool info is reset via bambulab interface
-    _augment_tray(spool_list, vt_tray_data, EXTERNAL_SPOOL_AMS_ID, EXTERNAL_SPOOL_ID)
-    issue |= vt_tray_data["issue"]
-
-    for ams in ams_data:
-      for tray in ams["tray"]:
-        _augment_tray(spool_list, tray, ams["id"], tray["id"])
-        issue |= tray["issue"]
-
-    ams_labels = build_ams_labels(ams_data)
-    return render_template('index.html', success_message=success_message, warning_message=warning_message, ams_data=ams_data, vt_tray_data=vt_tray_data, issue=issue, ams_labels=ams_labels)
+    view = _build_ams_view()
+    return render_template('index.html',
+                           success_message=request.args.get("success_message"),
+                           warning_message=request.args.get("warning_message"),
+                           **view)
   except Exception as e:
     traceback.print_exc()
     return render_template('error.html', exception=str(e))
+
+
+def _build_ams_view():
+  """Tray state for the home page, augmented with what Spoolman knows.
+
+  Shared with /ams_trays_fragment so the polled refresh cannot drift from the
+  first render.
+  """
+  last_ams_config = mqtt_bambulab.getLastAMSConfig()
+  ams_data = last_ams_config.get("ams", [])
+  vt_tray_data = last_ams_config.get("vt_tray", {})
+  spool_list = mqtt_bambulab.fetchSpools()
+
+  issue = False
+  #TODO: Fix issue when external spool info is reset via bambulab interface
+  _augment_tray(spool_list, vt_tray_data, EXTERNAL_SPOOL_AMS_ID, EXTERNAL_SPOOL_ID)
+  issue |= vt_tray_data["issue"]
+
+  for ams in ams_data:
+    for tray in ams["tray"]:
+      _augment_tray(spool_list, tray, ams["id"], tray["id"])
+      issue |= tray["issue"]
+
+  return {
+      "ams_data": ams_data,
+      "vt_tray_data": vt_tray_data,
+      "issue": issue,
+      "ams_labels": build_ams_labels(ams_data),
+  }
+
+
+@app.route("/ams_trays_fragment")
+def ams_trays_fragment():
+  """Just the tray grid, for the poller on the home page.
+
+  The page renders from a cached AMS snapshot, so after a tap a tray could sit
+  showing a stale "filament type mismatch" until it was reloaded by hand. Like
+  the banner route, this stays quiet rather than erroring - it is polled.
+  """
+  try:
+    return render_template('fragments/ams_trays.html', **_build_ams_view())
+  except Exception:
+    traceback.print_exc()
+    return "", 204
 
 def _mid_print_rebind_warning(locked, tray_id):
   """Message shown after rebinding a tray the running print is using.
@@ -565,6 +605,22 @@ def write_tag():
 @app.route('/health', methods=['GET'])
 def health():
   return "OK", 200
+
+@app.route("/current_print_banner")
+def current_print_banner():
+  """Just the banner markup, for the poller in base.html.
+
+  Deliberately never errors: the banner sits on every page, so a printer that
+  has gone offline must make it go quiet, not take the page down with it (which
+  is what home() does).
+  """
+  try:
+    summary = mqtt_bambulab.current_print_summary()
+  except Exception:
+    traceback.print_exc()
+    return ""
+  return render_template('fragments/current_print.html', print_summary=summary)
+
 
 @app.route("/print_history")
 def print_history():

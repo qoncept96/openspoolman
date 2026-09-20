@@ -1,0 +1,54 @@
+{#
+  What is printing right now, and which channels it has claimed.
+
+  Rendered into every page from base.html and refreshed in place by the poller
+  there, so the answer to "is this spool safe to pull?" is always on screen.
+  A locked channel is one the running print is mapped to: swapping it out is
+  what silently moved filament onto the next job's spool.
+
+  Renders nothing at all when the printer is idle.
+#}
+{% if print_summary and print_summary.live %}
+<div class="card mb-3 current-print">
+  <div class="card-body py-2">
+    <div class="d-flex align-items-center gap-2 flex-wrap">
+      <span class="badge text-bg-primary">{{ print_summary.state | title }}</span>
+      <strong class="text-truncate" style="max-width: 60%;">{{ print_summary.file_name }}</strong>
+      {% if print_summary.current_layer is not none and print_summary.total_layers %}
+      <span class="text-muted small">layer {{ print_summary.current_layer }} of {{ print_summary.total_layers }}</span>
+      {% endif %}
+      {% if print_summary.remaining_minutes %}
+      <span class="text-muted small ms-auto">{{ print_summary.remaining_minutes }} min left</span>
+      {% endif %}
+    </div>
+
+    {% if print_summary.percent is not none %}
+    <div class="progress mt-2" style="height: 4px;" role="progressbar"
+         aria-valuenow="{{ print_summary.percent }}" aria-valuemin="0" aria-valuemax="100">
+      <div class="progress-bar" style="width: {{ print_summary.percent }}%;"></div>
+    </div>
+    {% endif %}
+
+    {% for slot in print_summary.slots %}
+    <div class="d-flex align-items-center gap-2 mt-2 small">
+      {% if slot.color %}
+      <span class="d-inline-block rounded" style="width: 14px; height: 14px; background:#{{ slot.color }}; box-shadow: inset 0 0 0 1px rgba(0,0,0,.25);"></span>
+      {% endif %}
+      <span class="fw-semibold">
+        {% if slot.external %}External{% else %}Channel {{ slot.channel }}{% endif %}
+      </span>
+      {% if slot.locked %}
+      <i class="bi bi-lock-fill text-warning" title="In use by this print - do not swap"></i>
+      {% endif %}
+      {% if slot.pinned %}
+      <span class="badge text-bg-warning">swapped</span>
+      {% endif %}
+      <span class="text-muted text-truncate">{{ slot.spool_label or 'No spool assigned' }}</span>
+      <span class="text-muted ms-auto text-nowrap">
+        {{ '%.1f' | format(slot.grams_used or 0) }}g{% if slot.estimated_grams %} / {{ '%.1f' | format(slot.estimated_grams) }}g{% endif %}
+      </span>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}

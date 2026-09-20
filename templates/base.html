@@ -119,6 +119,7 @@
 });
   </script>
 <main class="container">
+  <div id="current-print-banner">{% include 'fragments/current_print.html' %}</div>
   {% if success_message %}
   <div class="alert alert-success alert-dismissible fade show" role="alert">
     <strong>Success!</strong> {{ success_message }}
@@ -133,6 +134,57 @@
   {% endif %}
   {% block content %}{% endblock %}
 </main>
+
+<script>
+  /* Keep the current-print banner live without reloading the page: a reload
+     would fight the NFC reader and throw away scroll position.
+
+     Two things to be careful of here. The link interceptor above replaces
+     document.body and re-runs every inline script, so a bare setInterval would
+     stack up one extra timer per navigation - hence the handle on window.
+     And this runs on a phone that spends the print in a pocket, so polling
+     stops while the tab is hidden. */
+  (function () {
+    var REFRESH_MS = 10000;
+
+    /* Replace a container's markup from a fragment route, leaving it alone if
+       the server said nothing useful or nothing actually changed (so the DOM is
+       not churned under the user's finger every ten seconds). */
+    function swap(id, url, after) {
+      var target = document.getElementById(id);
+      if (!target) return;
+      fetch(url, {cache: 'no-store'})
+        .then(function (r) { return r.ok && r.status !== 204 ? r.text() : null; })
+        .then(function (html) {
+          if (html === null) return;
+          if (target.innerHTML.trim() === html.trim()) return;
+          target.innerHTML = html;
+          if (after) after();
+        })
+        .catch(function () { /* printer or app down: leave the last state up */ });
+    }
+
+    function refresh() {
+      if (document.hidden) return;
+      swap('current-print-banner', '/current_print_banner');
+      /* Only present on the home page. Its AMS snapshot is cached server-side,
+         which is why a tray could sit showing a stale mismatch after a tap. */
+      swap('ams-trays', '/ams_trays_fragment');
+    }
+
+    if (window.__ospmBannerTimer) {
+      clearInterval(window.__ospmBannerTimer);
+    }
+    window.__ospmBannerTimer = setInterval(refresh, REFRESH_MS);
+
+    if (!window.__ospmBannerVisibilityBound) {
+      window.__ospmBannerVisibilityBound = true;
+      document.addEventListener('visibilitychange', function () {
+        if (!document.hidden) refresh();
+      });
+    }
+  })();
+</script>
 
 <div class="container">
   <footer class="d-flex flex-wrap justify-content-between align-items-center py-3 my-4 border-top">
