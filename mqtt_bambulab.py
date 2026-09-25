@@ -311,6 +311,10 @@ def map_filament(tray_tar):
     PENDING_PRINT_METADATA["filamentChanges"].append(tray_tar)  # Jeder Wechsel zählt, auch auf das gleiche Tray
     log(f'Filamentchange {len(PENDING_PRINT_METADATA["filamentChanges"])}: Tray {tray_tar}')
 
+    if PENDING_PRINT_METADATA.get("ams_mapping_from_printer"):
+      # Nothing to infer - the printer already said which tray each filament uses.
+      return False
+
     # Anzahl der erkannten Wechsel
     change_count = len(PENDING_PRINT_METADATA["filamentChanges"]) - 1  # -1, weil der erste Eintrag kein Wechsel ist
 
@@ -427,6 +431,12 @@ def processMessage(data):
             print_id = insert_print(PENDING_PRINT_METADATA.get("file"), PRINTER_STATE["print"]["print_type"], PENDING_PRINT_METADATA.get("image"))
 
             PENDING_PRINT_METADATA["ams_mapping"] = PRINTER_STATE["print"].get("ams_mapping") or []
+            # The printer handed us the real mapping. map_filament() only guesses one
+            # from the order trays are used in, and that guess must never overwrite it:
+            # on print 71 it rewrote filament 3 onto the brown tray, so blue's grams
+            # were deducted from the brown spool for the rest of a 10-hour print.
+            PENDING_PRINT_METADATA["ams_mapping_from_printer"] = bool(
+                PENDING_PRINT_METADATA["ams_mapping"])
             PENDING_PRINT_METADATA["filamentChanges"] = []
             PENDING_PRINT_METADATA["assigned_trays"] = []
             PENDING_PRINT_METADATA["complete"] = False
