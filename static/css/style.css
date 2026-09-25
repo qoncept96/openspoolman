@@ -490,3 +490,38 @@ main.container {
     box-sizing: border-box;
     font-size: 0;
 }
+
+/* Thumbnail lightbox on the print history page. The markup ships with the
+   upstream template but none of these classes were ever defined, so the
+   overlay rendered inline at the bottom of the page -- an <img src=""> that
+   every browser draws as a broken image. */
+.image-overlay.hidden {
+    display: none;
+}
+.image-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 1080;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+}
+.image-overlay .overlay-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.65);
+}
+.image-overlay .overlay-content {
+    position: relative;
+    max-width: min(90vw, 900px);
+    max-height: 90vh;
+}
+.image-overlay .overlay-image {
+    display: block;
+    width: 100%;
+    height: auto !important;
+    max-height: calc(90vh - 2rem);
+    object-fit: contain;
+    cursor: zoom-out;
+}
