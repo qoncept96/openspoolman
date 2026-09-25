@@ -1,6 +1,12 @@
 {% extends 'base.html' %}
 
 {% block content %}
+{# Unmissable on purpose: on this page a tag touching the phone gets overwritten,
+   everywhere else it just opens the spool. #}
+<div class="alert alert-warning d-flex align-items-center gap-2 fw-semibold" role="note">
+  <i class="bi bi-pencil-square fs-5"></i>
+  <span>WRITE MODE &mdash; the next tag you tap gets overwritten. Nothing is written until you press Start.</span>
+</div>
 <!-- Page Title -->
 <div class="text-center mb-4">
   <h1 class="fw-bold">NFC Write Process</h1>
@@ -41,8 +47,32 @@
   // rejects with "AbortError: push is canceled due to a new push request" --
   // which upstream then displayed as a write failure even though the new push
   // was still live. Keep a single in-flight write; a second press cancels.
+  //
+  // The shared pill in base.html shows the same thing at the bottom of the
+  // screen, amber, and is a second cancel button while a write is armed.
   let ndefWriter = null;
   let pendingWrite = null;
+
+  // base.html puts the pill after this block, so look it up when needed.
+  function pillSay(text) {
+    const pill = document.getElementById("nfc-pill");
+    if (!pill) return;
+    if (!text) { pill.hidden = true; return; }
+    pill.textContent = text;
+    pill.className = "write";
+    pill.hidden = false;
+    document.body.classList.add("has-nfc-pill");
+  }
+  document.addEventListener("click", function (event) {
+    if (pendingWrite && event.target.id === "nfc-pill") pendingWrite.abort();
+  });
+
+  function setIdle(label) {
+    const button = document.getElementById("write");
+    button.className = "btn btn-lg btn-primary shadow";
+    button.innerHTML = '<i class="bi bi-nfc me-2"></i> ' + label;
+    pillSay(null);
+  }
 
   function writeNFC() {
     const messageBox = document.getElementById("message");
@@ -61,27 +91,42 @@
 
     ndefWriter = ndefWriter || new NDEFReader();
     pendingWrite = new AbortController();
-    button.innerHTML = '<i class="bi bi-x-circle me-2"></i> Cancel';
+    button.className = "btn btn-lg btn-danger shadow";
+    button.innerHTML = '<i class="bi bi-x-circle me-2"></i> Cancel write';
+    pillSay("\u270e Writing \u2014 tap to cancel");
     messageBox.className = "alert alert-info text-center";
     messageBox.textContent = "Bring NFC Tag closer to the phone...";
 
+    const tag = {{ myuuid | tojson }};
     ndefWriter.write(
-      {records: [{recordType: "url", data: "{{ BASE_URL }}/spool_info?tag_id={{ myuuid }}"}]},
+      {records: [{recordType: "url", data: "{{ BASE_URL }}/spool_info?tag_id=" + tag}]},
       {signal: pendingWrite.signal}
     ).then(() => {
-      messageBox.className = "alert alert-success text-center";
-      messageBox.textContent = "\u2705 Message successfully written to the NFC tag!";
+      messageBox.className = "alert alert-info text-center";
+      messageBox.textContent = "Tag written, saving to Spoolman...";
+      return fetch("{{ url_for('write_tag_commit') }}", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({spool_id: {{ spool_id | tojson }}, tag: tag})
+      }).then(r => r.json().catch(() => ({})).then(body => {
+        if (!r.ok || !body.ok) throw new Error(body.error || ("HTTP " + r.status));
+        messageBox.className = "alert alert-success text-center";
+        messageBox.textContent = "\u2705 Tag written and saved. Tapping it now opens this spool.";
+      })).catch(err => {
+        messageBox.className = "alert alert-danger text-center";
+        messageBox.textContent = "\u274c The tag was written but Spoolman was not updated, so it will not open this spool yet: " + err.message + ". Press Start to try again.";
+      });
     }).catch(error => {
       if (error && error.name === "AbortError") {
         messageBox.className = "alert alert-secondary text-center";
-        messageBox.textContent = "Write cancelled. Press \"Start Writing NFC Tag\" to try again.";
+        messageBox.textContent = "Write cancelled. Nothing was changed.";
         return;
       }
       messageBox.className = "alert alert-danger text-center";
       messageBox.textContent = "\u274c Write failed. Please try again: " + error;
     }).finally(() => {
       pendingWrite = null;
-      button.innerHTML = '<i class="bi bi-nfc me-2"></i> Start Writing NFC Tag';
+      setIdle("Start Writing NFC Tag");
     });
   }
 </script>
