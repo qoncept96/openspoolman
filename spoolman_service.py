@@ -191,6 +191,7 @@ def augmentTrayDataWithSpoolMan(spool_list, tray_data, ams_id, tray_id):
   tray_data["bambu_sub_brand"] = ""
   tray_sub_brands_raw = ""
   tray_data["spool_id"] = None
+  tray_data.pop("pending_spool", None)
 
   def _clean_basic(val: str) -> str:
     # Normalization for matching:
@@ -222,6 +223,28 @@ def augmentTrayDataWithSpoolMan(spool_list, tray_data, ams_id, tray_id):
     ]:
       tray_data.pop(field, None)
     tray_data["spool_id"] = None
+
+    # The slot is physically empty, but a spool may still be bound to it: one just
+    # scanned in ahead of loading, or the one that was pulled out. Show that, so a
+    # tap visibly "took". Kept off spool_material/spool_id on purpose - everything
+    # that decides emptiness, mismatches or billing keys off those.
+    target_active_tray = json.dumps(trayUid(ams_id, tray_id))
+    for spool in spool_list:
+      if (spool.get("extra") or {}).get("active_tray") != target_active_tray:
+        continue
+      filament = spool.get("filament") or {}
+      multi = filament.get("multi_color_hexes")
+      if isinstance(multi, str):
+        multi = multi.split(",")
+      color = (multi[0] if multi else None) or filament.get("color_hex") or ""
+      tray_data["pending_spool"] = {
+        "id": spool["id"],
+        "name": filament.get("name") or "",
+        "vendor": (filament.get("vendor") or {}).get("name") or "",
+        "material": filament.get("material") or "",
+        "color": normalize_color_hex(color),
+      }
+      break
     return
 
   tray_uuid = str(tray_data.get("tray_uuid") or "")

@@ -16,6 +16,9 @@
 {% else %}
   {% set rail_color = None %}
 {% endif %}
+{# Bound in Spoolman but not in the AMS yet (or pulled out): see pending_spool in
+   augmentTrayDataWithSpoolMan. #}
+{% set pending = tray_data.pending_spool if not tray_data.spool_material else None %}
 {% set ams_color = tray_data.tray_color | replace('#', '') if tray_data.tray_color else None %}
 {% if pick_tray %}
   {% set row_href = url_for('tray_load', spool_id=current_spool['id'], tag_id=tag_id, ams=ams_id, tray=tray_id) %}
@@ -43,6 +46,8 @@
   {# Color rail: a gradient for multi-color spools, a flat fill otherwise. #}
   {% if colors %}
     <span class="tray-rail" style="background: linear-gradient(to bottom{% for color in colors %}, #{{ color }} {{ loop.index0 * 100 // colors|length }}%, #{{ color }} {{ loop.index * 100 // colors|length }}%{% endfor %});"></span>
+  {% elif pending and pending.color %}
+    <span class="tray-rail tray-rail-pending" style="--pending-color: #{{ pending.color }};"></span>
   {% elif rail_color %}
     <span class="tray-rail" style="background-color: #{{ rail_color }};"></span>
   {% else %}
@@ -64,6 +69,8 @@
         {{ tray_data.spool_material }}{% if tray_data.spool_sub_brand %} {{ tray_data.spool_sub_brand }}{% endif %} &middot; <span class="fw-semibold">{{ tray_data.name }}</span>
       {% elif tray_data.unmapped_bambu_tag %}
         <span class="text-warning fw-semibold">Unknown spool</span>{% if tray_data.bambu_material %} &middot; {{ tray_data.bambu_material }}{% endif %}
+      {% elif pending %}
+        <span class="text-muted">Empty &middot; waiting for</span> <span class="fw-semibold">{{ pending.name }}</span>{% if pending.material %} {{ pending.material }}{% endif %}
       {% else %}
         {% if tray_data.tray_type %}{{ tray_data.tray_type }} &middot; {% endif %}<span class="text-muted">Empty</span>
       {% endif %}
@@ -74,6 +81,8 @@
         {% if tray_data.last_used %}<span class="tray-used d-none d-md-inline">&middot; {{ tray_data.last_used }}</span>{% endif %}
       {% elif tray_data.unmapped_bambu_tag %}
         Bambu Lab{% if tray_data.bambu_sub_brand %} - {{ tray_data.bambu_sub_brand }}{% endif %}
+      {% elif pending %}
+        {% if pending.vendor %}{{ pending.vendor }} &middot; {% endif %}load it, or tap to reassign
       {% endif %}
     </span>
     {% if tray_data.mismatch %}

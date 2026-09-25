@@ -220,7 +220,7 @@ def fill():
     locked = mqtt_bambulab.setActiveTray(spool_id, spool_data["extra"], ams_id, tray_id)
     setActiveSpool(ams_id, tray_id, spool_data)
     return redirect(url_for('home',
-                            success_message=f"Updated Spool ID {spool_id} to AMS {ams_id}, Tray {tray_id}.",
+                            success_message=_assigned_message(spool_data, ams_id, tray_id),
                             warning_message=_mid_print_rebind_warning(locked, tray_id)))
   else:
     spools = mqtt_bambulab.fetchSpools()
@@ -282,7 +282,7 @@ def assign_bambu_spool():
     setActiveSpool(ams_id, tray_id, spool_data)
 
     return redirect(url_for('home',
-                            success_message=f"Linked Bambu spool to SpoolMan spool {spool_id} on AMS {ams_id}, Tray {tray_id}.",
+                            success_message="Linked Bambu tag: " + _assigned_message(spool_data, ams_id, tray_id),
                             warning_message=_mid_print_rebind_warning(locked, tray_id)))
 
   spools = mqtt_bambulab.fetchSpools()
@@ -432,7 +432,7 @@ def tray_load():
     setActiveSpool(ams_id, tray_id, spool_data)
 
     return redirect(url_for('home',
-                            success_message=f"Updated Spool ID {spool_id} with TAG id {tag_id} to AMS {ams_id}, Tray {tray_id}.",
+                            success_message=_assigned_message(spool_data, ams_id, tray_id),
                             warning_message=_mid_print_rebind_warning(locked, tray_id)))
   except Exception as e:
     traceback.print_exc()
@@ -543,6 +543,24 @@ def ams_trays_fragment():
   except Exception:
     traceback.print_exc()
     return "", 204
+
+def _assigned_message(spool_data, ams_id, tray_id):
+  """"Blue PETG -> AMS slot 2" for the toast after an assignment.
+
+  Named by colour and material rather than Spoolman id, and with the slot
+  numbered the way the AMS labels it (tray ids are 0-based).
+  """
+  filament = spool_data.get("filament") or {}
+  what = " ".join(p for p in (filament.get("name"), filament.get("material")) if p) or f"Spool {spool_data.get('id')}"
+  try:
+    ams_num, tray_num = int(ams_id), int(tray_id)
+  except (TypeError, ValueError):
+    return f"{what} assigned."
+  if ams_num == EXTERNAL_SPOOL_AMS_ID:
+    return f"{what} \u2192 external spool"
+  unit = f"AMS {chr(ord('A') + ams_num)}" if ams_num else "AMS"
+  return f"{what} \u2192 {unit} slot {tray_num + 1}"
+
 
 def _mid_print_rebind_warning(locked, tray_id):
   """Message shown after rebinding a tray the running print is using.

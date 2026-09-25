@@ -171,6 +171,14 @@ main.container {
         var(--bs-tertiary-bg) 3px 6px);
 }
 
+/* Empty slot with a spool bound to it in Spoolman: the empty stripes, but in the
+   spool's colour, so it reads as "this is coming" rather than "this is loaded". */
+.tray-rail-pending {
+    background: repeating-linear-gradient(135deg,
+        var(--pending-color) 0 3px,
+        transparent 3px 6px);
+}
+
 .tray-slot {
     flex: 0 0 1.4rem;
     text-align: center;
