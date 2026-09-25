@@ -37,6 +37,11 @@ PRINTER_IP = os.getenv("PRINTER_IP")  # Printer local IP address - Check wireles
 PRINTER_NAME = os.getenv("PRINTER_NAME")  # Printer name - Check wireless on printer
 SPOOLMAN_BASE_URL = os.getenv("SPOOLMAN_BASE_URL")
 SPOOLMAN_API_URL = f"{SPOOLMAN_BASE_URL}/api/v1"
+# SPOOLMAN_BASE_URL has to stay reachable from inside the container, so it is a LAN
+# address. That address is dead on a phone that is off the home wifi, so pages served
+# over the tailnet hand the browser this URL for the Spoolman links instead.
+SPOOLMAN_TAILNET_URL = os.getenv("SPOOLMAN_TAILNET_URL")
+TAILNET_SUFFIX = os.getenv("TAILNET_SUFFIX", ".ts.net")
 AUTO_SPEND = _env_to_bool("AUTO_SPEND", False)
 TRACK_LAYER_USAGE = _env_to_bool("TRACK_LAYER_USAGE", False)
 SPOOL_SORTING = os.getenv(

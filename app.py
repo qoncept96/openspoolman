@@ -11,6 +11,8 @@ from config import (
     BASE_URL,
     AUTO_SPEND,
     SPOOLMAN_BASE_URL,
+    SPOOLMAN_TAILNET_URL,
+    TAILNET_SUFFIX,
     EXTERNAL_SPOOL_AMS_ID,
     EXTERNAL_SPOOL_ID,
     PRINTER_NAME,
@@ -58,13 +60,30 @@ def inject_current_print():
   except Exception:
     return {"print_summary": None}
 
+def spoolman_link_base():
+  """The Spoolman URL to put in an <a href>, which is not always the one we call.
+
+  SPOOLMAN_BASE_URL is the API base too, so it has to resolve from inside the
+  container -- a LAN IP. A phone reading this page over the tailnet cannot reach
+  that IP, so when the page itself came in over the tailnet, link to the tailnet
+  address instead. Unset SPOOLMAN_TAILNET_URL and everything behaves as before.
+  """
+  base = (SPOOLMAN_BASE_URL or "").rstrip("/")
+  if not SPOOLMAN_TAILNET_URL:
+    return base
+  host = (request.host or "").split(":")[0].lower()
+  if host.endswith(TAILNET_SUFFIX):
+    return SPOOLMAN_TAILNET_URL.rstrip("/")
+  return base
+
+
 @app.context_processor
 def fronted_utilities():
   printer_model = mqtt_bambulab.getPrinterModel() or {}
   ams_models_by_id = mqtt_bambulab.getDetectedAmsModelsById()
 
   return dict(
-    SPOOLMAN_BASE_URL=SPOOLMAN_BASE_URL,
+    SPOOLMAN_BASE_URL=spoolman_link_base(),
     AUTO_SPEND=AUTO_SPEND,
     AMS_MODELS_BY_ID=ams_models_by_id,
     color_is_dark=color_is_dark,
