@@ -39,7 +39,7 @@
   {% set bar_pct = None %}
 {% endif %}
 
-<div class="tray-row{% if is_external %} tray-row-external{% endif %}">
+<div class="tray-row{% if is_external %} tray-row-external{% endif %}" data-tray-key="{{ ams_id }}-{{ tray_id }}">
   {# Color rail: a gradient for multi-color spools, a flat fill otherwise. #}
   {% if colors %}
     <span class="tray-rail" style="background: linear-gradient(to bottom{% for color in colors %}, #{{ color }} {{ loop.index0 * 100 // colors|length }}%, #{{ color }} {{ loop.index * 100 // colors|length }}%{% endfor %});"></span>

@@ -1,3 +1,4 @@
+import hashlib
 import json
 import math
 import os
@@ -54,11 +55,14 @@ app = Flask(__name__)
 @app.context_processor
 def inject_current_print():
   """Every template gets print_summary, so base.html can render the banner on
-  first paint rather than waiting a poll interval for it to appear."""
+  first paint rather than waiting a poll interval for it to appear.
+
+  live_version seeds the poller, so a change landing right after the page loaded
+  is not mistaken for the baseline and missed."""
   try:
-    return {"print_summary": mqtt_bambulab.current_print_summary()}
+    return {"print_summary": mqtt_bambulab.current_print_summary(), "live_version": _live_digest()}
   except Exception:
-    return {"print_summary": None}
+    return {"print_summary": None, "live_version": ""}
 
 def spoolman_link_base():
   """The Spoolman URL to put in an <a href>, which is not always the one we call.
@@ -316,72 +320,81 @@ def assign_bambu_spool():
     selected_materials=selected_materials,
   )
 
+def _build_spool_view(tag_id, spool_id):
+  """Everything spool_info.html needs, or an error string.
+
+  Shared with /spool_trays_fragment so the polled tray grid is rendered from
+  exactly the same data as the first page load.
+  """
+  if not tag_id and not spool_id:
+    return None, "TAG ID or spool_id is required as a query parameter (e.g., ?tag_id=RFID123 or ?spool_id=1)"
+
+  spool_id_int = None
+  if spool_id is not None:
+    try:
+      spool_id_int = int(spool_id)
+    except ValueError:
+      return None, "Invalid spool_id provided"
+
+  view = _build_ams_view()
+  spools = mqtt_bambulab.fetchSpools()
+  current_spool = None
+
+  for spool in spools:
+    if spool_id_int is not None and spool['id'] == spool_id_int:
+      current_spool = spool
+      if not tag_id:
+        tag_value = spool.get("extra", {}).get("tag")
+        if tag_value:
+          tag_id = json.loads(tag_value)
+      break
+
+    if not tag_id:
+      continue
+
+    if not spool.get("extra", {}).get("tag"):
+      continue
+
+    tag = json.loads(spool["extra"]["tag"])
+    if tag != tag_id:
+      continue
+
+    current_spool = spool
+    break
+
+  if not current_spool:
+    return None, "Spool not found"
+
+  view.update(tag_id=tag_id, current_spool=current_spool)
+  return view, None
+
+
 @app.route("/spool_info")
 def spool_info():
   if not mqtt_bambulab.isMqttClientConnected():
     return render_template('error.html', exception="MQTT is disconnected. Is the printer online?")
 
   try:
-    tag_id = request.args.get("tag_id")
-    spool_id = request.args.get("spool_id")
-    last_ams_config = mqtt_bambulab.getLastAMSConfig()
-    ams_data = last_ams_config.get("ams", [])
-    vt_tray_data = last_ams_config.get("vt_tray", {})
-    spool_list = mqtt_bambulab.fetchSpools()
-
-    issue = False
-    #TODO: Fix issue when external spool info is reset via bambulab interface
-    _augment_tray(spool_list, vt_tray_data, EXTERNAL_SPOOL_AMS_ID, EXTERNAL_SPOOL_ID)
-    issue |= vt_tray_data.get("issue", False)
-
-    for ams in ams_data:
-      for tray in ams["tray"]:
-        _augment_tray(spool_list, tray, ams["id"], tray["id"])
-        issue |= tray.get("issue", False)
-
-    if not tag_id and not spool_id:
-      return render_template('error.html', exception="TAG ID or spool_id is required as a query parameter (e.g., ?tag_id=RFID123 or ?spool_id=1)")
-
-    spools = mqtt_bambulab.fetchSpools()
-    current_spool = None
-
-    spool_id_int = None
-    if spool_id is not None:
-      try:
-        spool_id_int = int(spool_id)
-      except ValueError:
-        return render_template('error.html', exception="Invalid spool_id provided")
-
-    for spool in spools:
-      if spool_id_int is not None and spool['id'] == spool_id_int:
-        current_spool = spool
-        if not tag_id:
-          tag_value = spool.get("extra", {}).get("tag")
-          if tag_value:
-            tag_id = json.loads(tag_value)
-        break
-
-      if not tag_id:
-        continue
-
-      if not spool.get("extra", {}).get("tag"):
-        continue
-
-      tag = json.loads(spool["extra"]["tag"])
-      if tag != tag_id:
-        continue
-
-      current_spool = spool
-      break
-
-    if current_spool:
-      ams_labels = build_ams_labels(ams_data)
-      return render_template('spool_info.html', tag_id=tag_id, current_spool=current_spool, ams_data=ams_data, vt_tray_data=vt_tray_data, issue=issue, ams_labels=ams_labels)
-    else:
-      return render_template('error.html', exception="Spool not found")
+    view, error = _build_spool_view(request.args.get("tag_id"), request.args.get("spool_id"))
+    if error:
+      return render_template('error.html', exception=error)
+    return render_template('spool_info.html', **view)
   except Exception as e:
     traceback.print_exc()
     return render_template('error.html', exception=str(e))
+
+
+@app.route("/spool_trays_fragment")
+def spool_trays_fragment():
+  """Just the tray grid of the spool page, for the poller. Quiet on failure."""
+  try:
+    view, error = _build_spool_view(request.args.get("tag_id"), request.args.get("spool_id"))
+    if error:
+      return "", 204
+    return render_template('fragments/spool_trays.html', **view)
+  except Exception:
+    traceback.print_exc()
+    return "", 204
 
 
 @app.route("/spool/info/<int:spool_id>")
@@ -611,19 +624,86 @@ def write_tag():
     if not spool_id:
       return render_template('error.html', exception="spool ID is required as a query parameter (e.g., ?spool_id=1)")
 
+    # The new id is only saved to Spoolman once the tag has actually been
+    # written (see write_tag_commit). Saving it here, as upstream does, meant
+    # merely opening this page -- or cancelling -- orphaned the spool's
+    # existing tag.
     myuuid = str(uuid.uuid4())
-
-    spoolman_client.patchExtraTags(spool_id, {}, {
-      "tag": json.dumps(myuuid),
-    })
-    return render_template('write_tag.html', myuuid=myuuid)
+    return render_template('write_tag.html', myuuid=myuuid, spool_id=spool_id)
   except Exception as e:
     traceback.print_exc()
     return render_template('error.html', exception=str(e))
 
+@app.route("/write_tag/commit", methods=["POST"])
+def write_tag_commit():
+  """Record a tag id on the spool after write_tag.html wrote it to the tag."""
+  body = request.get_json(silent=True) or {}
+  spool_id = body.get("spool_id")
+  tag = body.get("tag")
+  try:
+    uuid.UUID(str(tag))
+    int(spool_id)
+  except (TypeError, ValueError):
+    return {"ok": False, "error": "spool_id and a tag uuid are required"}, 400
+
+  try:
+    spoolman_client.patchExtraTags(spool_id, {}, {
+      "tag": json.dumps(tag),
+    })
+    # patchExtraTags does not report HTTP failures, so read it back.
+    saved = (spoolman_client.getSpoolById(spool_id).get("extra") or {}).get("tag")
+    if not saved or json.loads(saved) != tag:
+      return {"ok": False, "error": "Spoolman did not save the tag id"}, 502
+  except Exception as e:
+    traceback.print_exc()
+    return {"ok": False, "error": str(e)}, 502
+  return {"ok": True}
+
 @app.route('/health', methods=['GET'])
 def health():
   return "OK", 200
+
+# Only the fields the pages actually draw. Hashing the whole payload would flip
+# on every temperature report, and the tray dicts also collect the Spoolman
+# fields _augment_tray writes into them, which change when a page renders.
+_LIVE_TRAY_KEYS = ("id", "tray_type", "tray_sub_brands", "tray_color", "tray_uuid",
+                   "tag_uid", "remain", "tray_info_idx", "cols")
+_LIVE_PRINT_KEYS = ("gcode_state", "mc_percent", "layer_num", "total_layer_num",
+                    "mc_remaining_time", "subtask_name", "ams_mapping")
+
+
+def _live_digest():
+  """A short fingerprint of what the live pages show.
+
+  The pages poll /live_version every couple of seconds and only re-fetch their
+  fragments (which hit Spoolman) when this changes, so polling fast stays cheap.
+  Spoolman writes made by this app bump spoolman_client.CHANGE_COUNT; edits made
+  in Spoolman's own UI are caught by the pages' slow fallback refresh instead.
+  """
+  def trays(items):
+    return [{k: t.get(k) for k in _LIVE_TRAY_KEYS} for t in items or [] if isinstance(t, dict)]
+
+  try:
+    config = mqtt_bambulab.getLastAMSConfig()
+    state = (mqtt_bambulab.PRINTER_STATE or {}).get("print", {})
+    snapshot = [
+      [{"id": a.get("id"), "humidity": a.get("humidity"), "tray": trays(a.get("tray"))}
+       for a in config.get("ams", [])],
+      trays([config.get("vt_tray") or {}]),
+      {k: state.get(k) for k in _LIVE_PRINT_KEYS},
+      spoolman_client.CHANGE_COUNT,
+      mqtt_bambulab.isMqttClientConnected(),
+    ]
+    return hashlib.sha1(json.dumps(snapshot, sort_keys=True, default=str).encode()).hexdigest()[:16]
+  except Exception:
+    traceback.print_exc()
+    return ""
+
+
+@app.route("/live_version")
+def live_version():
+  return {"v": _live_digest()}, 200, {"Cache-Control": "no-store"}
+
 
 @app.route("/current_print_banner")
 def current_print_banner():

@@ -120,87 +120,150 @@
   </script>
 <main class="container">
   <div id="current-print-banner">{% include 'fragments/current_print.html' %}</div>
-  {% if success_message %}
-  <div class="alert alert-success alert-dismissible fade show" role="alert">
-    <strong>Success!</strong> {{ success_message }}
-    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-  </div>
-  {% endif %}
-  {% if warning_message %}
-  <div class="alert alert-warning alert-dismissible fade show" role="alert">
-    <strong>Heads up.</strong> {{ warning_message }}
-    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-  </div>
-  {% endif %}
   {% block content %}{% endblock %}
 </main>
 
+{#
+  Messages from the redirect after an action. Toasts rather than alerts so they
+  do not sit on the page forever: a success fades on its own, a warning (a
+  mid-print rebind) stays until closed because it is the one worth reading.
+#}
+<div id="toast-stack" class="toast-container position-fixed top-0 start-50 translate-middle-x p-2">
+  {% if success_message %}
+  <div class="toast align-items-center text-bg-success border-0" role="status" aria-live="polite" data-bs-delay="4000">
+    <div class="d-flex">
+      <div class="toast-body"><i class="bi bi-check-circle-fill me-1"></i>{{ success_message }}</div>
+      <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+    </div>
+  </div>
+  {% endif %}
+  {% if warning_message %}
+  <div class="toast align-items-center text-bg-warning border-0" role="alert" aria-live="assertive" data-bs-autohide="false">
+    <div class="d-flex">
+      <div class="toast-body"><i class="bi bi-exclamation-triangle-fill me-1"></i>{{ warning_message }}</div>
+      <button type="button" class="btn-close me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+    </div>
+  </div>
+  {% endif %}
+</div>
+
 <script>
-  /* Keep the current-print banner live without reloading the page: a reload
+  /* Keep the live parts of the page current without reloading it: a reload
      would fight the NFC reader and throw away scroll position.
 
-     Two things to be careful of here. The link interceptor above replaces
-     document.body and re-runs every inline script, so a bare setInterval would
-     stack up one extra timer per navigation - hence the handle on window.
-     And this runs on a phone that spends the print in a pocket, so polling
-     stops while the tab is hidden. */
+     /live_version is a tiny fingerprint of the AMS, the print progress and our
+     own Spoolman writes. It is polled every couple of seconds; the fragments
+     themselves (which hit Spoolman) are only re-fetched when it moves, plus a
+     slow fallback for edits made in Spoolman's own UI.
+
+     The link interceptor above replaces document.body and re-runs every inline
+     script, so timers and document listeners live on window and are never
+     stacked. Polling stops while the tab is hidden. */
   (function () {
-    var REFRESH_MS = 10000;
+    var TICK_MS = 2000;
+    var FALLBACK_MS = 30000;
+    var TARGETS = [
+      {id: 'current-print-banner', url: function () { return '/current_print_banner'; }},
+      {id: 'ams-trays', url: function () { return '/ams_trays_fragment'; }},
+      {id: 'spool-trays', url: function () { return '/spool_trays_fragment' + location.search; }}
+    ];
 
-    /* Never swap markup out from under someone who is mid-interaction: a tap
-       landing on a row that was replaced a frame earlier hits the wrong thing.
-       Covers a focused control, an open popover/modal/dropdown, and anything
-       touched in the last few seconds. */
-    var lastTouch = 0;
-    ['pointerdown', 'keydown'].forEach(function (evt) {
-      document.addEventListener(evt, function () { lastTouch = Date.now(); }, true);
-    });
+    var live = window.__ospmLive = window.__ospmLive || {};
+    live.version = {{ live_version | tojson }};
+    live.dirty = false;
+    live.lastFull = Date.now();
+    live.inflight = false;
 
-    function busy(target) {
-      if (Date.now() - lastTouch < 8000) return true;
-      if (document.querySelector('.popover.show, .modal.show, .dropdown-menu.show')) return true;
+    /* Only hold back the one row under the user's finger, not the whole page:
+       a tap landing on a row that was replaced a frame earlier hits the wrong
+       thing, but every other row is fair game. */
+    if (!window.__ospmPointerBound) {
+      window.__ospmPointerBound = true;
+      document.addEventListener('pointerdown', function (e) {
+        live.pointerAt = Date.now();
+        live.pointerEl = e.target;
+      }, true);
+    }
+
+    function held(el) {
+      if (live.pointerEl && el.contains(live.pointerEl) && Date.now() - live.pointerAt < 1500) return true;
       var active = document.activeElement;
-      if (active && active !== document.body && target.contains(active)) return true;
-      var selection = window.getSelection && window.getSelection();
-      if (selection && !selection.isCollapsed) return true;
+      if (active && active !== document.body && el.contains(active)) return true;
+      if (el.querySelector('[aria-describedby^="popover"], .popover-visible')) return true;
       return false;
     }
 
-    /* Replace a container's markup from a fragment route, leaving it alone if
-       the server said nothing useful or nothing actually changed (so the DOM is
-       not churned under the user's finger every ten seconds). */
-    function swap(id, url, after) {
-      var target = document.getElementById(id);
-      if (!target) return;
-      if (busy(target)) return;
-      fetch(url, {cache: 'no-store'})
-        .then(function (r) { return r.ok && r.status !== 204 ? r.text() : null; })
-        .then(function (html) {
-          if (html === null) return;
-          if (target.innerHTML.trim() === html.trim()) return;
-          target.innerHTML = html;
-          if (after) after();
-        })
-        .catch(function () { /* printer or app down: leave the last state up */ });
+    function keysOf(root) {
+      return Array.prototype.map.call(root.querySelectorAll('[data-tray-key]'),
+        function (n) { return n.getAttribute('data-tray-key'); }).join('|');
     }
 
-    function refresh() {
-      if (document.hidden) return;
-      swap('current-print-banner', '/current_print_banner');
-      /* Only present on the home page. Its AMS snapshot is cached server-side,
-         which is why a tray could sit showing a stale mismatch after a tap. */
-      swap('ams-trays', '/ams_trays_fragment');
+    /* Returns false if something was held back, so the next tick retries. */
+    function apply(target, html) {
+      if (target.innerHTML.trim() === html.trim()) return true;
+      var tpl = document.createElement('template');
+      tpl.innerHTML = html;
+
+      var fresh = tpl.content.querySelectorAll('[data-tray-key]');
+      if (fresh.length && keysOf(tpl.content) === keysOf(target)) {
+        var old = target.querySelectorAll('[data-tray-key]');
+        var clean = true;
+        Array.prototype.forEach.call(fresh, function (row, i) {
+          if (old[i].outerHTML === row.outerHTML) return;
+          if (held(old[i])) { clean = false; return; }
+          old[i].replaceWith(row);
+          window.ospmInitPopovers && window.ospmInitPopovers(row);
+        });
+        /* Rows done; anything else that changed (AMS humidity) needs the lot. */
+        if (!clean || target.innerHTML.trim() === html.trim()) return clean;
+      }
+
+      if (held(target)) return false;
+      target.innerHTML = html;
+      window.ospmInitPopovers && window.ospmInitPopovers(target);
+      return true;
+    }
+
+    function refreshTargets() {
+      return Promise.all(TARGETS.map(function (t) {
+        var target = document.getElementById(t.id);
+        if (!target) return true;
+        return fetch(t.url(), {cache: 'no-store'})
+          .then(function (r) { return r.ok && r.status !== 204 ? r.text() : null; })
+          .then(function (html) { return html === null ? true : apply(target, html); })
+          .catch(function () { return true; /* printer or app down: leave the last state up */ });
+      }));
+    }
+
+    function tick() {
+      if (document.hidden || live.inflight) return;
+      if (!TARGETS.some(function (t) { return document.getElementById(t.id); })) return;
+      live.inflight = true;
+      fetch('/live_version', {cache: 'no-store'})
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (body) {
+          var v = body && body.v;
+          var due = Date.now() - live.lastFull > FALLBACK_MS;
+          if (!live.dirty && !due && (!v || v === live.version)) return;
+          return refreshTargets().then(function (results) {
+            live.version = v || live.version;
+            live.lastFull = Date.now();
+            live.dirty = results.indexOf(false) !== -1;
+          });
+        })
+        .catch(function () {})
+        .then(function () { live.inflight = false; });
     }
 
     if (window.__ospmBannerTimer) {
       clearInterval(window.__ospmBannerTimer);
     }
-    window.__ospmBannerTimer = setInterval(refresh, REFRESH_MS);
+    window.__ospmBannerTimer = setInterval(tick, TICK_MS);
 
     if (!window.__ospmBannerVisibilityBound) {
       window.__ospmBannerVisibilityBound = true;
       document.addEventListener('visibilitychange', function () {
-        if (!document.hidden) refresh();
+        if (!document.hidden) { live.dirty = true; tick(); }
       });
     }
   })();
@@ -230,9 +293,13 @@
       updateTheme()
     }
   })()
-  document.addEventListener('DOMContentLoaded', function () {
-    const popoverTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="popover"]'))
-    popoverTriggerList.forEach(function (popoverTriggerEl) {
+  /* Popovers are set up per trigger, and the poller swaps tray rows in and out,
+     so this runs again on whatever it inserts. One document-level listener
+     closes them, rather than one per trigger piling up with every swap. */
+  window.ospmInitPopovers = function (root) {
+    root.querySelectorAll('[data-bs-toggle="popover"]').forEach(function (popoverTriggerEl) {
+      if (popoverTriggerEl.dataset.ospmPopover) return
+      popoverTriggerEl.dataset.ospmPopover = '1'
       const popover = new bootstrap.Popover(popoverTriggerEl, {container: 'body', trigger: 'manual'})
       const showPopover = () => popover.show()
       const hidePopover = () => {
@@ -260,45 +327,78 @@
         popoverTriggerEl.classList.toggle('popover-visible')
         popoverTriggerEl.classList.contains('popover-visible') ? showPopover() : hidePopover()
       }, { passive: false })
+    })
+  }
 
-      document.addEventListener('click', function (event) {
-        if (!popoverTriggerEl.contains(event.target)) {
-          hidePopover()
-        }
+  if (!window.__ospmPopoverCloseBound) {
+    window.__ospmPopoverCloseBound = true
+    document.addEventListener('click', function (event) {
+      document.querySelectorAll('[data-ospm-popover]').forEach(function (el) {
+        if (el.contains(event.target)) return
+        const popover = bootstrap.Popover.getInstance(el)
+        if (popover) popover.hide()
+        el.classList.remove('popover-visible')
       })
     })
-  })
+  }
+
+  function ospmPageReady() {
+    window.ospmInitPopovers(document)
+
+    document.querySelectorAll('#toast-stack .toast').forEach(function (el) {
+      bootstrap.Toast.getOrCreateInstance(el).show()
+    })
+    /* The message rode in on the redirect URL; drop it so a reload or a
+       bookmark does not show it again. */
+    const url = new URL(location.href)
+    const had = url.searchParams.has('success_message') || url.searchParams.has('warning_message')
+    url.searchParams.delete('success_message')
+    url.searchParams.delete('warning_message')
+    if (had) history.replaceState(history.state, '', url.pathname + url.search + url.hash)
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', ospmPageReady)
+  else ospmPageReady()
 </script>
 
 <!-- patch 7: in-page NFC tag capture (see openspoolman-patch/patch7.py) -->
 <style>
+  /* One chip, always in the same spot, whose colour says what the NFC radio is
+     doing: green = scanning (a tag opens that spool), amber = writing (a tag
+     gets overwritten; set by write_tag.html), grey = off. Tap it to switch. */
   #nfc-pill {
     position: fixed; left: 50%; transform: translateX(-50%);
     bottom: 12px; z-index: 1080; max-width: 92vw;
-    border: 0; border-radius: 999px; padding: .5rem 1rem;
-    font-size: .875rem; line-height: 1.2; box-shadow: 0 .25rem .75rem rgba(0,0,0,.3);
+    border: 0; border-radius: 999px; padding: .4rem .9rem;
+    font-size: .8125rem; line-height: 1.2; box-shadow: 0 .25rem .75rem rgba(0,0,0,.3);
     background: var(--bs-secondary-bg, #e9ecef); color: var(--bs-body-color, #212529);
   }
   #nfc-pill.armed { background: var(--bs-success, #198754); color: #fff; }
   #nfc-pill.hot   { background: var(--bs-primary, #0d6efd); color: #fff; }
+  #nfc-pill.write { background: var(--bs-warning, #ffc107); color: #000; font-weight: 600; }
   #nfc-pill[hidden] { display: none; }
+  body.has-nfc-pill { padding-bottom: 3.5rem; }
 </style>
 <button id="nfc-pill" type="button" hidden></button>
 <script>
 (function () {
-  // write_tag owns the NFC radio for pushing; a reader there would grab the
-  // freshly written tag and navigate away mid-write.
+  // write_tag owns the NFC radio for pushing (and drives the pill itself); a
+  // reader there would grab the freshly written tag and navigate away mid-write.
   if (location.pathname.indexOf('/write_tag') === 0) return;
   if (!('NDEFReader' in window)) return;   // http:// or non-Chrome: no-op
 
+  // Turning scanning off sticks for the rest of the session, so it does not
+  // quietly re-arm on the next page.
+  const OFF_KEY = 'ospm-scan-off';
   const pill = document.getElementById('nfc-pill');
   const reader = new NDEFReader();
-  let scanning = false, handled = false;
+  let controller = null, handled = false;
 
   function say(text, cls) {
     pill.textContent = text;
     pill.className = cls || '';
     pill.hidden = false;
+    document.body.classList.add('has-nfc-pill');
   }
 
   function tagUrl(message) {
@@ -317,25 +417,26 @@
   }
 
   reader.onreading = function (event) {
-    if (handled) return;
+    if (handled || !controller) return;
     const url = tagUrl(event.message);
-    if (!url) { say('Tag has no OpenSpoolMan link', ''); return; }
+    if (!url) { say('Tag has no OpenSpoolMan link', 'armed'); return; }
     handled = true;
     say('Opening spool…', 'hot');
     if (navigator.vibrate) navigator.vibrate(40);
     location.replace(url);   // same tab, no history entry
   };
 
-  reader.onreadingerror = function () { say('Could not read that tag — tap again', ''); };
+  reader.onreadingerror = function () { say('Could not read that tag — tap again', 'armed'); };
 
   function start(fromClick) {
-    if (scanning) return;
-    scanning = true;
-    reader.scan().then(function () {
-      say('● Tap a spool tag', 'armed');
-      setTimeout(function () { if (!handled) pill.hidden = true; }, 4000);
+    if (controller) return;
+    controller = new AbortController();
+    reader.scan({signal: controller.signal}).then(function () {
+      sessionStorage.removeItem(OFF_KEY);
+      say('● Scan on — tap to stop', 'armed');
     }).catch(function (err) {
-      scanning = false;
+      controller = null;
+      if (err && err.name === 'AbortError') return;
       if (err && err.name === 'NotAllowedError' && !fromClick) {
         say('Enable tap-to-scan', '');   // needs a gesture to ask for permission
         return;
@@ -344,10 +445,21 @@
     });
   }
 
+  function stop() {
+    if (controller) controller.abort();
+    controller = null;
+    sessionStorage.setItem(OFF_KEY, '1');
+    say('○ Scan off — tap to start', '');
+  }
+
   pill.addEventListener('click', function () {
-    if (scanning) { pill.hidden = true; return; }
-    start(true);
+    if (controller) stop(); else start(true);
   });
+
+  if (sessionStorage.getItem(OFF_KEY)) {
+    say('○ Scan off — tap to start', '');
+    return;
+  }
 
   // Permission is remembered per origin, so after the first grant every page
   // load arms itself with no tap at all.

@@ -6,7 +6,13 @@ from logger import append_to_rotating_file, log
 SPOOLMAN_LOG_FILE = "/home/app/logs/spoolman.log"
 
 
+# Bumped on every write to Spoolman, so /live_version can tell the pages their
+# spool numbers are stale without them having to re-fetch the spool list.
+CHANGE_COUNT = 0
+
 def _log_spoolman_change(action, spool_id=None, payload=None, status=None):
+  global CHANGE_COUNT
+  CHANGE_COUNT += 1
   parts = [action]
 
   if spool_id is not None:

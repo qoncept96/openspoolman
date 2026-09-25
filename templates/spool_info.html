@@ -1,48 +1,9 @@
 {% extends 'base.html' %}
 
-{% from 'fragments/ams_metrics.html' import humidity_display %}
-
 {% block content %}
 {% include 'fragments/spool_details.html' %}
 
 <h5 class="mb-3">Assign Tray</h5>
-<!-- AMS units, then the external spool last -->
-<div class="row">
-  {% for ams in ams_data %}
-  <div class="col-12 col-xl-6 mb-3 ams-card">
-    <div class="card shadow-sm">
-      <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-1">
-        {% set ams_key = ams.id %}
-        {% set ams_label = ams_labels.get(ams_key|string) or ams_labels.get(ams_key) or "AMS" %}
-        <h6 class="mb-0">{{ ams_label }}</h6>
-        {{ humidity_display(ams) }}
-      </div>
-      <div class="card-body p-0">
-        {% for tray in ams.tray %}
-          {% with tray_data=tray, ams_id=ams.id, pick_tray=True, tray_id=tray.id %}
-            {% include 'fragments/tray.html' %}
-          {% endwith %}
-        {% endfor %}
-      </div>
-    </div>
-  </div>
-  {% endfor %}
-
-  <!-- External Spool -->
-  <div class="col-12 mb-3 external-tray">
-    <div class="card shadow-sm">
-      <div class="card-header py-1">
-        <span class="text-uppercase small fw-bold text-body-secondary">
-          <i class="bi bi-box-seam me-1"></i>External spool
-        </span>
-      </div>
-      <div class="card-body p-0">
-        {% with tray_data=vt_tray_data, ams_id=EXTERNAL_SPOOL_AMS_ID, pick_tray=True, tray_id=EXTERNAL_SPOOL_ID %}
-          {% include 'fragments/tray.html' %}
-        {% endwith %}
-      </div>
-    </div>
-  </div>
-</div>
+<div id="spool-trays">{% include 'fragments/spool_trays.html' %}</div>
 
 {% endblock %}
