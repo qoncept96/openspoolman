@@ -56,7 +56,9 @@ def live_print_context() -> Tuple[Optional[int], Optional[str]]:
   # No state yet means MQTT has told us nothing; trust the tracker rather than
   # raise a false alarm. A tracker holding a print_id while the printer reports
   # FINISH/IDLE means the tracker missed the end - that row really is stuck.
-  live_id = print_id if print_id and (state is None or state in LIVE_GCODE_STATES) else None
+  # Unless the print only just started: see is_print_starting().
+  live = state is None or state in LIVE_GCODE_STATES or tracker.is_print_starting()
+  live_id = print_id if print_id and live else None
   return live_id, state
 
 

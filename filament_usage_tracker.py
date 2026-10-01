@@ -251,6 +251,9 @@ class FilamentUsageTracker:
     self.current_layer = None
     self.print_metadata = None
     self.print_id = None
+    # Set when a new print_id arrives, cleared by the first live gcode_state. Covers
+    # the gap where the row exists but gcode_state is still FINISH from the last print.
+    self._print_id_awaiting_live_since = None
     self.cumulative_grams_used = {}  # Track cumulative grams used per filament index
     self.cumulative_length_used = {}  # Track cumulative length (mm) per filament index
     self._layer_tracking_total_layers = None
@@ -293,8 +296,20 @@ class FilamentUsageTracker:
       self._set_layer_tracking_status(
           LAYER_TRACKING_STATUS_ABORTED, target_print_id=self.print_id
       )
+    if incoming_id and incoming_id != self.print_id:
+      self._print_id_awaiting_live_since = datetime.now()
     self.print_metadata = metadata
     self.print_id = incoming_id
+
+  def is_print_starting(self) -> bool:
+    """True between a new print_id and the first live gcode_state, capped at 15 min.
+
+    The print-start FTP download blocks the MQTT thread, so gcode_state can sit on
+    the previous print's FINISH for a minute or more after the new row exists. The
+    cap keeps a print that never reaches a live state from being masked forever.
+    """
+    since = self._print_id_awaiting_live_since
+    return since is not None and datetime.now() - since < timedelta(minutes=15)
 
   def on_message(self, message: dict) -> None:
     if "print" not in message:
@@ -309,6 +324,8 @@ class FilamentUsageTracker:
 
     previous_state = self.gcode_state
     self.gcode_state = print_obj.get("gcode_state", self.gcode_state)
+    if (print_obj.get("gcode_state") or "").upper() in LIVE_GCODE_STATES:
+      self._print_id_awaiting_live_since = None
     if "mc_remaining_time" in print_obj:
       try:
         self._mc_remaining_time_minutes = float(print_obj["mc_remaining_time"])
