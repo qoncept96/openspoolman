@@ -18,7 +18,7 @@ from config import (
     CLEAR_ASSIGNMENT_WHEN_EMPTY,
 )
 from messages import GET_VERSION, PUSH_ALL, AMS_FILAMENT_SETTING
-from spoolman_service import spendFilaments, setActiveTray, fetchSpools, clear_active_spool_for_tray, getAMSFromTray
+from spoolman_service import spendFilaments, setActiveTray, fetchSpools, clear_active_spool_for_tray, getAMSFromTray, trayUid
 from tools_3mf import getMetaDataFrom3mf
 import time
 import copy
@@ -141,7 +141,50 @@ def current_print_summary() -> dict:
         "pinned": pinned_spool_id is not None,
     })
 
+  summary["feed"] = _feed_needed(print_obj, spools_by_tray)
   return summary
+
+
+def _feed_needed(print_obj: dict, spools_by_tray: dict) -> dict | None:
+  """The tray the printer is stuck trying to load, while it is paused.
+
+  A failed filament change (the previous one didn't retract far enough, the
+  next one can't reach the extruder) pauses the print with tray_tar still
+  pointing at the tray it wanted. That is the spool to hand-feed. Only shown
+  while paused or erroring: during a normal swap tray_tar leads tray_now for a
+  few seconds and would just flicker.
+  """
+  if print_obj.get("gcode_state") != "PAUSE" and not print_obj.get("print_error"):
+    return None
+  ams = print_obj.get("ams") or {}
+  try:
+    target = int(ams.get("tray_tar"))
+  except (TypeError, ValueError):
+    return None
+  if target == EXTERNAL_SPOOL_ID or target < 0 or target >= 255:
+    return None
+  if str(ams.get("tray_now")) == str(target):
+    return None
+
+  ams_id = getAMSFromTray(target)
+  tray_id = target - ams_id * 4
+  spool = spools_by_tray.get(trayUid(ams_id, tray_id))
+
+  color = ""
+  for unit in LAST_AMS_CONFIG.get("ams") or []:
+    if str(unit.get("id")) != str(ams_id):
+      continue
+    for tray in unit.get("tray") or []:
+      if str(tray.get("id")) == str(tray_id):
+        color = (tray.get("tray_color") or "")[:6]
+  if spool and (spool.get("filament") or {}).get("color_hex"):
+    color = spool["filament"]["color_hex"][:6]
+
+  return {
+      "channel": tray_id + 1,
+      "color": color,
+      "spool_label": _spool_label(spool) if spool else None,
+  }
 
 
 LOG_FILE = "/home/app/logs/mqtt.log"
